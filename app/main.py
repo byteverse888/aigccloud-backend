@@ -1,0 +1,123 @@
+"""
+AIGC Cloud Platform API
+主入口文件
+"""
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
+
+from app.core.config import settings
+from app.core.redis_client import redis_client
+from app.core.logger import logger
+from app.api.v1 import router as api_v1_router
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """应用生命周期管理"""
+    # Startup
+    logger.info("Starting up CloudendAPI...")
+    
+    # 初始化 Redis 连接
+    try:
+        await redis_client.connect()
+        logger.info("Redis connected successfully")
+    except Exception as e:
+        logger.error(f"Redis connection failed: {e}")
+    
+    yield
+    
+    # Shutdown
+    logger.info("Shutting down CloudendAPI...")
+    
+    # 关闭 Redis 连接
+    try:
+        await redis_client.disconnect()
+        logger.info("Redis disconnected")
+    except Exception:
+        pass
+
+
+app = FastAPI(
+    title="AIGC Cloud Platform API",
+    description="""
+## CloudendAPI - AIGC云平台后端服务
+
+### 功能模块
+
+- **用户管理** `/api/v1/users` - 注册、激活、Web3绑定
+- **支付管理** `/api/v1/payment` - 订单创建、微信支付回调
+- **任务管理** `/api/v1/tasks` - AI任务提交、状态查询
+- **激励系统** `/api/v1/incentive` - 每日奖励、金币管理
+- **推广系统** `/api/v1/promotion` - 邀请统计、推广记录
+- **商品管理** `/api/v1/products` - 审核、举报处理
+
+### 认证方式
+
+大部分接口需要在 Header 中携带 JWT Token:
+```
+Authorization: Bearer <token>
+```
+    """,
+    version="1.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc",
+    lifespan=lifespan,
+)
+
+# CORS 配置
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # 生产环境应限制为具体域名
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# 注册路由
+app.include_router(api_v1_router, prefix="/api/v1")
+
+
+@app.get("/", tags=["Root"])
+async def root():
+    """API 根路径"""
+    return {
+        "message": "Welcome to AIGC Cloud Platform API",
+        "version": "1.0.0",
+        "docs": "/docs",
+        "redoc": "/redoc",
+    }
+
+
+@app.get("/health", tags=["Health"])
+async def health_check():
+    """健康检查"""
+    health_status = {
+        "status": "healthy",
+        "services": {
+            "api": "up",
+        }
+    }
+    
+    # 检查 Redis
+    try:
+        if redis_client._client:
+            await redis_client.client.ping()
+            health_status["services"]["redis"] = "up"
+        else:
+            health_status["services"]["redis"] = "not connected"
+    except Exception:
+        health_status["services"]["redis"] = "down"
+    
+    return health_status
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(
+        "app.main:app",
+        host=settings.api_host,
+        port=settings.api_port,
+        reload=settings.debug,
+    )

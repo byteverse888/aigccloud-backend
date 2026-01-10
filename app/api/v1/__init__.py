@@ -1,0 +1,19 @@
+from fastapi import APIRouter
+
+from app.api.v1.endpoints import users, payment, tasks, incentive, promotion, products, auth, storage
+
+router = APIRouter()
+
+# 认证相关
+router.include_router(auth.router, prefix="/auth", tags=["Auth"])
+
+# 业务端点
+router.include_router(users.router, prefix="/users", tags=["Users"])
+router.include_router(payment.router, prefix="/payment", tags=["Payment"])
+router.include_router(tasks.router, prefix="/tasks", tags=["Tasks"])
+router.include_router(incentive.router, prefix="/incentive", tags=["Incentive"])
+router.include_router(promotion.router, prefix="/promotion", tags=["Promotion"])
+router.include_router(products.router, prefix="/products", tags=["Products"])
+
+# 文件存储（预签名URL）
+router.include_router(storage.router, prefix="/storage", tags=["Storage"])
