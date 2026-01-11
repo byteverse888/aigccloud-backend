@@ -110,9 +110,3 @@ def get_settings() -> Settings:
 
 
 settings = get_settings()
-@lru_cache()
-def get_settings() -> Settings:
-    return Settings()
-
-
-settings = get_settings()

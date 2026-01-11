@@ -191,6 +191,112 @@ class Web3Client:
         from_param = from_address[2:].lower().zfill(64)
         amount_param = hex(amount)[2:].zfill(64)
         return method_id + from_param + amount_param
+    
+    async def get_transaction(self, tx_hash: str) -> dict:
+        """
+        查询交易详情
+        
+        Args:
+            tx_hash: 交易hash
+            
+        Returns:
+            交易详情，包含 tx_status:
+            - "not_found": 交易不存在
+            - "pending": 待确认
+            - "confirmed": 已确认成功
+            - "failed": 交易失败
+        """
+        if not self.rpc_url:
+            # 开发环境模拟返回
+            return {
+                "success": True,
+                "tx_status": "confirmed",
+                "confirmed": True,
+                "from": "0x0000000000000000000000000000000000000000",
+                "to": "0x0000000000000000000000000000000000000000",
+                "value": "0x0",
+            }
+        
+        try:
+            result = await self._call_rpc("eth_getTransactionByHash", [tx_hash])
+            tx = result.get("result")
+            if not tx:
+                return {"success": False, "tx_status": "not_found", "error": "交易不存在"}
+            
+            # 查询交易收据
+            receipt_result = await self._call_rpc("eth_getTransactionReceipt", [tx_hash])
+            receipt = receipt_result.get("result")
+            
+            # 确定交易状态
+            if receipt is None:
+                tx_status = "pending"  # 待确认
+                confirmed = False
+            elif receipt.get("status") == "0x1":
+                tx_status = "confirmed"  # 已确认成功
+                confirmed = True
+            else:
+                tx_status = "failed"  # 交易失败
+                confirmed = False
+            
+            return {
+                "success": True,
+                "tx_status": tx_status,
+                "confirmed": confirmed,
+                "from": tx.get("from"),
+                "to": tx.get("to"),
+                "value": tx.get("value"),
+                "blockNumber": tx.get("blockNumber"),
+            }
+        except Exception as e:
+            return {"success": False, "tx_status": "error", "error": str(e)}
+    
+    async def verify_transfer(self, tx_hash: str, from_address: str, to_address: str, amount: int) -> dict:
+        """
+        验证转账是否有效
+        
+        Args:
+            tx_hash: 交易hash
+            from_address: 发送方地址
+            to_address: 接收方地址
+            amount: 预期金额
+            
+        Returns:
+            验证结果，包含 tx_status
+        """
+        if not self.rpc_url:
+            # 开发环境模拟验证成功
+            return {"success": True, "verified": True, "tx_status": "confirmed"}
+        
+        tx_info = await self.get_transaction(tx_hash)
+        tx_status = tx_info.get("tx_status", "error")
+        
+        if not tx_info.get("success"):
+            return {"success": False, "tx_status": tx_status, "error": tx_info.get("error", "查询交易失败")}
+        
+        # 待确认状态，返回特定信息
+        if tx_status == "pending":
+            return {"success": True, "verified": False, "tx_status": "pending", "message": "交易待确认"}
+        
+        # 交易失败
+        if tx_status == "failed":
+            return {"success": False, "verified": False, "tx_status": "failed", "error": "交易执行失败"}
+        
+        # 已确认，继续验证地址和金额
+        tx_from = tx_info.get("from", "").lower()
+        tx_to = tx_info.get("to", "").lower()
+        
+        if tx_from != from_address.lower():
+            return {"success": False, "tx_status": "confirmed", "error": "发送方地址不匹配"}
+        
+        if tx_to != to_address.lower():
+            return {"success": False, "tx_status": "confirmed", "error": "接收方地址不匹配"}
+        
+        # 验证金额
+        tx_value = int(tx_info.get("value", "0x0"), 16)
+        if tx_value < amount:
+            return {"success": False, "tx_status": "confirmed", "error": "转账金额不足"}
+        
+        return {"success": True, "verified": True, "tx_status": "confirmed"}
 
 
 # 全局单例

@@ -4,6 +4,7 @@ Redis 客户端
 import redis.asyncio as redis
 from typing import Optional, Any
 from app.core.config import settings
+from app.core.logger import logger
 
 
 class RedisClient:
@@ -15,11 +16,20 @@ class RedisClient:
     async def connect(self):
         """建立连接"""
         if self._client is None:
+            redis_url = settings.redis_url
+            logger.info(f"[Redis] 连接URL: {redis_url}")
             self._client = redis.from_url(
-                settings.redis_url,
+                redis_url,
                 encoding="utf-8",
                 decode_responses=True
             )
+            # 立即测试连接
+            try:
+                await self._client.ping()
+                logger.info("[Redis] Ping 成功")
+            except Exception as e:
+                logger.error(f"[Redis] Ping 失败: {e}")
+                raise
     
     async def disconnect(self):
         """关闭连接"""

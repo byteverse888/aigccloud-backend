@@ -2,8 +2,10 @@
 Parse Server REST API 客户端
 """
 import httpx
+import json as json_lib
 from typing import Optional, Dict, Any, List
 from app.core.config import settings
+from app.core.logger import logger
 
 
 class ParseClient:
@@ -28,17 +30,43 @@ class ParseClient:
     ) -> Dict[str, Any]:
         """发送请求到 Parse Server"""
         url = f"{self.base_url}{endpoint}"
+        
+        # 调试日志：请求信息
+        logger.debug(f"[Parse] 请求: {method} {url}")
+        logger.debug(f"[Parse] Headers: App-Id={self.app_id[:8]}..., REST-Key={self.rest_api_key[:8] if self.rest_api_key else 'N/A'}...")
+        if data:
+            # 隐藏敏感字段
+            safe_data = {k: ('***' if k in ['password'] else v) for k, v in data.items()}
+            logger.debug(f"[Parse] Body: {json_lib.dumps(safe_data, ensure_ascii=False)}")
+        if params:
+            logger.debug(f"[Parse] Params: {params}")
+        
         async with httpx.AsyncClient() as client:
-            response = await client.request(
-                method=method,
-                url=url,
-                headers=self.headers,
-                json=data,
-                params=params,
-                timeout=30.0
-            )
-            response.raise_for_status()
-            return response.json()
+            try:
+                response = await client.request(
+                    method=method,
+                    url=url,
+                    headers=self.headers,
+                    json=data,
+                    params=params,
+                    timeout=30.0
+                )
+                
+                # 调试日志：响应信息
+                logger.debug(f"[Parse] 响应: {response.status_code}")
+                if response.status_code >= 400:
+                    logger.error(f"[Parse] 错误响应: {response.text}")
+                
+                response.raise_for_status()
+                result = response.json()
+                logger.debug(f"[Parse] 成功: {str(result)[:200]}...")
+                return result
+            except httpx.HTTPStatusError as e:
+                logger.error(f"[Parse] HTTP错误: {e.response.status_code} - {e.response.text}")
+                raise
+            except Exception as e:
+                logger.error(f"[Parse] 请求异常: {str(e)}")
+                raise
     
     # ============ 对象操作 ============
     
@@ -96,15 +124,12 @@ class ParseClient:
     
     # ============ 用户操作 ============
     
-    async def create_user(self, username: str, email: str, password: str, extra_data: Optional[Dict] = None) -> Dict[str, Any]:
-        """创建用户"""
-        data = {
-            "username": username,
-            "email": email,
-            "password": password,
-        }
-        if extra_data:
-            data.update(extra_data)
+    async def create_user(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """创建用户
+        
+        Args:
+            data: 用户数据字典，必须包含 username 和 password
+        """
         return await self._request("POST", "/users", data)
     
     async def get_user(self, user_id: str) -> Dict[str, Any]:
