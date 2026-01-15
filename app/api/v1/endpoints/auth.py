@@ -12,7 +12,11 @@ from web3 import Web3
 
 from app.core.parse_client import parse_client
 from app.core.redis_client import redis_client
-from app.core.security import create_access_token, verify_jwt_token, generate_sms_code
+from app.core.security import (
+    create_access_token,
+    verify_jwt_token,
+    generate_sms_code,
+)
 from app.core.config import settings
 from app.core.logger import logger
 
@@ -378,89 +382,124 @@ async def refresh_token(current_token: str = Depends(verify_jwt_token)):
         raise HTTPException(status_code=401, detail="Token无效")
 
 
-# ============ Web3 认证 ============
+# ============ Web3 认证 (无密码签名验证) ============
+
+import secrets
 
 def validate_eth_address(address: str) -> str:
-    """验证并标准化 ETH 地址"""
+    """验证并返回 checksum 格式地址"""
     try:
         return Web3.to_checksum_address(address)
     except Exception:
         raise HTTPException(status_code=400, detail="无效的钱包地址")
 
 
-def verify_signature(message: str, signature: str, expected_address: str) -> bool:
-    """验证签名"""
+def verify_signature(message: str, signature: str, expected_address: str) -> str:
+    """
+    验证签名并返回恢复的地址 (checksum 格式)
+    失败时返回空字符串
+    """
     try:
         w3 = Web3()
         message_hash = encode_defunct(text=message)
-        recovered_address = w3.eth.account.recover_message(message_hash, signature=signature)
-        return recovered_address.lower() == expected_address.lower()
+        recovered = w3.eth.account.recover_message(message_hash, signature=signature)
+        return Web3.to_checksum_address(recovered)
     except Exception:
-        return False
+        return ""
 
 
-@router.post("/web3/init")
-async def web3_init(request: Web3InitRequest):
+async def _generate_unique_nonce(address: str) -> str:
     """
-    Web3 登录初始化 - 生成 nonce
+    生成 128 位强度 nonce，使用 SETNX 原子操作确保全局唯一
+    """
+    max_attempts = 10
+    for _ in range(max_attempts):
+        # 128 位 = 16 字节 = 32 字符 hex
+        nonce = secrets.token_hex(16)
+        key = f"nonce:{nonce}"
+        # 原子操作，仅当键不存在时设置
+        if await redis_client.setnx(key, address, ex=900):  # 15 分钟有效
+            return nonce
+    raise HTTPException(status_code=500, detail="Nonce 生成失败，请重试")
+
+
+@router.post("/web3/nonce")
+async def web3_get_nonce(request: Web3InitRequest):
+    """
+    申请 Nonce - Electron 客户端专用
     
-    流程：
-    1. 客户端传入钱包地址
-    2. 服务端生成随机 nonce 并存入 Redis（有效期 5 分钟）
-    3. 返回 nonce 和要签名的消息模板
+    - 生成 128 位高强度随机数
+    - 存入 Redis，15 分钟有效
+    - 返回 nonce 和过期时间
     """
-    logger.info(f"[Web3] 初始化登录: {request.address[:10]}...")
-    # 标准化地址
+    logger.info(f"[Web3] 申请Nonce: {request.address[:10]}...")
+    
     address = validate_eth_address(request.address)
-    
-    # 生成 nonce（16 字节 hex）
-    nonce = uuid.uuid4().hex
-    
-    # 存入 Redis，5 分钟过期
-    key = f"web3_nonce:{address.lower()}"
-    await redis_client.set(key, nonce, ex=300)
-    
-    # 返回要签名的消息
-    message = f"巴特星球登录验证\n\n钱包地址: {address}\nNonce: {nonce}\n\n此签名仅用于身份验证，不会产生任何链上交易"
+    nonce = await _generate_unique_nonce(address)
     
     logger.info(f"[Web3] Nonce已生成: {address[:10]}... -> {nonce[:8]}...")
     return {
         "success": True,
         "nonce": nonce,
-        "message": message,
-        "address": address
+        "expires_in": 900,  # 15分钟
+        "message": f"Sign in to AIGCCloud: {nonce}"
     }
 
 
+# 带密码的签名验证逻辑
 async def _verify_web3_signature(request: Web3LoginRequest):
     """
-    通用的 Web3 签名验证逻辑
+    Web3 签名验证逻辑 (带密码的前端接口)
     返回: (address, username)
     """
     # 1. 标准化地址
     address = validate_eth_address(request.address)
     
-    # 2. 从 Redis 获取 nonce
-    key = f"web3_nonce:{address.lower()}"
-    stored_nonce = await redis_client.get(key)
+    # 2. 从 message 中提取 nonce
+    # 消息格式: "Sign in to AIGCCloud: {nonce}"
+    nonce_from_message = None
+    if ": " in request.message:
+        nonce_from_message = request.message.split(": ")[-1].strip()
     
-    if not stored_nonce:
+    # 3. 尝试新格式验证: nonce:{nonce} -> address
+    used_key = None
+    is_new_format = False
+    
+    if nonce_from_message:
+        new_key = f"nonce:{nonce_from_message}"
+        stored_address = await redis_client.get(new_key)
+        if stored_address:
+            # 新格式：验证地址匹配
+            if stored_address.lower() != address.lower():
+                logger.warning(f"[Web3] Nonce地址不匹配: {address[:10]}...")
+                raise HTTPException(status_code=400, detail="无效的签名消息")
+            used_key = new_key
+            is_new_format = True
+    
+    # 4. 尝试旧格式验证: web3_nonce:{address} -> nonce
+    if not used_key:
+        old_key = f"web3_nonce:{address.lower()}"
+        stored_nonce = await redis_client.get(old_key)
+        if stored_nonce:
+            # 旧格式：验证 message 包含 nonce
+            if stored_nonce not in request.message:
+                raise HTTPException(status_code=400, detail="无效的签名消息")
+            used_key = old_key
+    
+    if not used_key:
         logger.warning(f"[Web3] Nonce过期或不存在: {address[:10]}...")
         raise HTTPException(status_code=400, detail="验证已过期，请重新获取")
     
-    # 3. 验证消息包含 nonce
-    if stored_nonce not in request.message:
-        raise HTTPException(status_code=400, detail="无效的签名消息")
-    
-    # 4. 验证签名
-    if not verify_signature(request.message, request.signature, address):
+    # 5. 验证签名
+    recovered = verify_signature(request.message, request.signature, address)
+    if not recovered or recovered.lower() != address.lower():
         logger.warning(f"[Web3] 签名验证失败: {address[:10]}...")
         raise HTTPException(status_code=400, detail="签名验证失败")
     
-    # 5. 删除 nonce（一次性使用，防止重放攻击）
-    await redis_client.delete(key)
+    # 6. 删除 nonce（一次性使用，防止重放攻击）
+    await redis_client.delete(used_key)
     
-    # 6. 验证密码
+    # 7. 验证密码
     if not request.password:
         raise HTTPException(status_code=400, detail="请输入登录密码")
     if len(request.password) < 6:
@@ -468,7 +507,6 @@ async def _verify_web3_signature(request: Web3LoginRequest):
     
     username = address.lower()
     return address, username
-
 
 async def _update_last_login(user_id: str, session_token: str, address: str):
     """更新最后登录时间"""
@@ -512,9 +550,11 @@ def _build_user_response(user_data: dict, session_token: str, address: str):
         "web3Address": address,
         "inviteCount": user_data.get("inviteCount", 0),
     }
+    # Parse 配置 - 登录后动态下发，客户端无需静态配置
     parse_config = {
         "serverUrl": settings.parse_server_url,
-        "appId": settings.parse_app_id,
+        "appId": settings.parse_app_id,        # X-Parse-Application-Id
+        "jsKey": settings.parse_js_key,         # X-Parse-Javascript-Key
     }
     return safe_user, parse_config
 
@@ -641,14 +681,33 @@ async def web3_login(request: Web3LoginRequest):
             "message": "登录成功"
         }
     else:
-        # 解析错误
-        error_data = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
-        error_code = error_data.get("code")
-        
-        if error_code == 101:  # 用户不存在
-            logger.warning(f"[Web3] 用户不存在: {address[:10]}...")
-            raise HTTPException(status_code=404, detail="该地址未注册，请先注册")
-        else:
-            # 密码错误或其他错误
-            logger.warning(f"[Web3] 登录失败: {address[:10]}... - code={error_code}")
-            raise HTTPException(status_code=401, detail="登录密码错误")
+        # Parse 错误码 101 不区分用户不存在还是密码错误
+        logger.warning(f"[Web3] 登录失败: {address[:10]}...")
+        raise HTTPException(status_code=401, detail="该地址未注册或密码不对，请确认")
+
+
+
+@router.post("/web3/logout")
+async def web3_logout(
+    authorization: Optional[str] = Header(None)
+):
+    """
+    Web3 登出 - 撤销 JWT
+    
+    客户端应该:
+    1. 清除本地存储的 JWT
+    2. 清除内存中的 Parse 密钥缓存
+    
+    服务端可选:
+    - 将 JWT 加入黑名单 (Redis)
+    """
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization[7:]
+        # 可选: 将 token 加入黑名单
+        # await redis_client.set(f"jwt_blacklist:{token}", "1", ex=86400)
+        logger.info(f"[Web3] 登出: token={token[:20]}...")
+    
+    return {
+        "success": True,
+        "message": "登出成功"
+    }

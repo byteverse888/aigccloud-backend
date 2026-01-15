@@ -9,7 +9,11 @@ from contextlib import asynccontextmanager
 from app.core.config import settings
 from app.core.redis_client import redis_client
 from app.core.logger import logger
+from app.core.arq_worker import get_arq_pool, close_arq_pool
 from app.api.v1 import router as api_v1_router
+
+# ARQ Worker 实例
+_arq_worker = None
 
 
 @asynccontextmanager
@@ -25,13 +29,45 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Redis connection failed: {e}")
     
-    # 后台任务由 Celery 处理
-    logger.info("后台任务由 Celery Worker 处理")
+    # 初始化 ARQ 连接池
+    try:
+        await get_arq_pool()
+        logger.info("ARQ 连接池初始化成功")
+    except Exception as e:
+        logger.error(f"ARQ 连接失败: {e}")
+    
+    # 启动 ARQ Worker
+    global _arq_worker
+    try:
+        import asyncio
+        from arq import Worker
+        from app.tasks.worker import WorkerSettings
+        
+        _arq_worker = Worker(
+            functions=WorkerSettings.functions,
+            cron_jobs=WorkerSettings.cron_jobs,
+            redis_settings=WorkerSettings.redis_settings,
+            max_jobs=WorkerSettings.max_jobs,
+            job_timeout=WorkerSettings.job_timeout,
+        )
+        asyncio.create_task(_arq_worker.async_run())
+        logger.info("ARQ Worker 已启动")
+    except Exception as e:
+        logger.error(f"ARQ Worker 启动失败: {e}")
     
     yield
     
     # Shutdown
     logger.info("Shutting down CloudendAPI...")
+    
+    # 关闭 ARQ
+    try:
+        if _arq_worker:
+            await _arq_worker.close()
+        await close_arq_pool()
+        logger.info("ARQ 已关闭")
+    except Exception:
+        pass
     
     # 关闭 Redis 连接
     try:

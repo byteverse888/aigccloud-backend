@@ -175,54 +175,6 @@ services:
       timeout: 10s
       retries: 5
 
-  # Celery Worker
-  celery-worker:
-    build:
-      context: ../CloudendAPI
-      dockerfile: Dockerfile
-    container_name: aigccloud-celery-worker
-    restart: unless-stopped
-    command: celery -A app.core.celery_app worker --loglevel=info --concurrency=4
-    environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-aigccloud}:${POSTGRES_PASSWORD:-aigccloud123}@postgres:5432/${POSTGRES_DB:-aigccloud}
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      REDIS_DB: 0
-      PARSE_SERVER_URL: http://parse-server:1337/parse
-      PARSE_APP_ID: ${PARSE_APP_ID:-aigccloud}
-      PARSE_REST_API_KEY: ${PARSE_REST_API_KEY:-restapi_service_key}
-    volumes:
-      - ../CloudendAPI:/app
-    depends_on:
-      redis:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
-
-  # Celery Beat (定时任务调度)
-  celery-beat:
-    build:
-      context: ../CloudendAPI
-      dockerfile: Dockerfile
-    container_name: aigccloud-celery-beat
-    restart: unless-stopped
-    command: celery -A app.core.celery_app beat --loglevel=info
-    environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-aigccloud}:${POSTGRES_PASSWORD:-aigccloud123}@postgres:5432/${POSTGRES_DB:-aigccloud}
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      REDIS_DB: 0
-      PARSE_SERVER_URL: http://parse-server:1337/parse
-      PARSE_APP_ID: ${PARSE_APP_ID:-aigccloud}
-      PARSE_REST_API_KEY: ${PARSE_REST_API_KEY:-restapi_service_key}
-    volumes:
-      - ../CloudendAPI:/app
-    depends_on:
-      redis:
-        condition: service_healthy
-      celery-worker:
-        condition: service_started
-
   # Next.js 前端
   frontend:
     build:
