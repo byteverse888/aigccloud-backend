@@ -30,7 +30,9 @@ class Settings(BaseSettings):
 
     # JWT
     jwt_secret_key: str = "your-secret-key-256bits-random-string"  # 256位随机字符串
+    jwt_secret_key: str = "your-secret-key-256bits-random-string"  # 256位随机字符串
     jwt_algorithm: str = "HS256"
+    jwt_access_token_expire_minutes: int = 1440  # 24小时
     jwt_access_token_expire_minutes: int = 1440  # 24小时
 
     # WeChat Pay (测试数据)
