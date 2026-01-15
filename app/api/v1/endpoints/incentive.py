@@ -11,19 +11,12 @@ from app.core.parse_client import parse_client
 from app.core.redis_client import redis_client
 from app.core.web3_client import web3_client
 from app.core.deps import get_current_user_id
+from app.core.incentive_service import incentive_service, IncentiveType, INCENTIVE_CONFIG
 
 router = APIRouter()
 
 
-# ============ 枚举与模型 ============
-
-class IncentiveType(str, Enum):
-    REGISTER = "register"  # 注册奖励
-    DAILY_LOGIN = "daily_login"  # 每日登录
-    INVITE = "invite"  # 邀请奖励
-    TASK = "task"  # 任务奖励
-    ACTIVITY = "activity"  # 活动奖励
-
+# ============ 模型 ============
 
 class ClaimDailyRequest(BaseModel):
     pass  # 无需额外参数
@@ -31,28 +24,17 @@ class ClaimDailyRequest(BaseModel):
 
 class GrantIncentiveRequest(BaseModel):
     user_id: str
-    type: IncentiveType
+    type: str  # IncentiveType 字符串
     amount: float
     description: str
 
 
 class IncentiveRecord(BaseModel):
     id: str
-    type: IncentiveType
+    type: str
     amount: float
     description: str
     created_at: datetime
-
-
-# 奖励配置
-INCENTIVE_CONFIG = {
-    "register": 100,  # 注册奖励
-    "daily_login_normal": 5,  # 普通用户每日登录
-    "daily_login_paid": 10,  # 付费用户每日登录
-    "invite_register": 100,  # 邀请注册奖励
-    "invite_first_recharge_rate": 0.1,  # 邀请首充奖励比例
-    "task_complete": 1,  # 任务完成奖励
-}
 
 
 # ============ 端点 ============
@@ -67,42 +49,20 @@ async def claim_daily_reward(user_id: str = Depends(get_current_user_id)):
     if already_claimed:
         raise HTTPException(status_code=400, detail="今日奖励已领取")
     
-    # 2. 获取用户信息判断奖励金额
-    try:
-        user = await parse_client.get_user(user_id)
-    except Exception:
-        raise HTTPException(status_code=404, detail="用户不存在")
+    # 2. 通过激励服务发放奖励
+    result = await incentive_service.grant_daily_login(user_id)
     
-    is_paid = user.get("isPaid", False)
-    amount = INCENTIVE_CONFIG["daily_login_paid"] if is_paid else INCENTIVE_CONFIG["daily_login_normal"]
+    if not result.get("success"):
+        raise HTTPException(status_code=500, detail=result.get("error", "发放奖励失败"))
     
-    # 3. 获取用户Web3地址
-    web3_address = user.get("web3Address")
-    if not web3_address:
-        raise HTTPException(status_code=400, detail="用户未绑定Web3地址，无法发放奖励")
-    
-    # 4. 通过Web3接口发放金币到联盟链
-    mint_result = await web3_client.mint(web3_address, int(amount))
-    if not mint_result.get("success"):
-        raise HTTPException(status_code=500, detail="发放奖励失败")
-    
-    # 5. 记录奖励日志（仅作为流水记录，金币存储在联盟链）
-    await parse_client.create_object("IncentiveLog", {
-        "userId": user_id,
-        "web3Address": web3_address,
-        "type": IncentiveType.DAILY_LOGIN,
-        "amount": amount,
-        "txHash": mint_result.get("tx_hash"),
-        "description": f"每日登录奖励（{'会员' if is_paid else '普通'}用户）"
-    })
-    
-    # 6. 设置Redis领取标记
+    # 3. 设置Redis领取标记
     await redis_client.set_daily_claim_flag(user_id)
     
     return {
         "success": True,
-        "amount": amount,
-        "message": f"领取成功，获得 {amount} 金币",
+        "amount": result.get("amount"),
+        "tx_hash": result.get("tx_hash"),
+        "message": result.get("message", f"领取成功，获得 {result.get('amount')} 金币"),
     }
 
 
@@ -116,16 +76,17 @@ async def check_daily_status(user_id: str = Depends(get_current_user_id)):
     # 获取用户信息
     try:
         user = await parse_client.get_user(user_id)
-        is_paid = user.get("isPaid", False)
+        member_level = user.get("memberLevel", "normal")
+        is_vip = member_level in ("vip", "svip")
     except Exception:
-        is_paid = False
+        is_vip = False
     
-    amount = INCENTIVE_CONFIG["daily_login_paid"] if is_paid else INCENTIVE_CONFIG["daily_login_normal"]
+    amount = INCENTIVE_CONFIG["daily_login_paid"] if is_vip else INCENTIVE_CONFIG["daily_login_normal"]
     
     return {
         "claimed": claimed,
         "amount": amount,
-        "is_paid": is_paid,
+        "member_level": member_level if 'member_level' in dir() else "normal",
     }
 
 
@@ -188,7 +149,7 @@ async def get_balance(user_id: str = Depends(get_current_user_id)):
         return {
             "coins": coins,
             "web3_address": web3_address,
-            "is_paid": user.get("isPaid", False),
+            "member_level": user.get("memberLevel", "normal"),
         }
     except Exception:
         raise HTTPException(status_code=404, detail="用户不存在")

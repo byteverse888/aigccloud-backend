@@ -10,6 +10,7 @@ from app.core.parse_client import parse_client
 from app.core.web3_client import web3_client
 from app.core.deps import get_current_user_id
 from app.core.config import settings
+from app.core.incentive_service import incentive_service, INCENTIVE_CONFIG
 
 router = APIRouter()
 
@@ -209,23 +210,20 @@ async def bind_inviter(
         "successRegCount": parse_client.increment(1)
     })
     
-    # 发放邀请奖励（通过Web3接口铸造金币）
-    inviter_web3_address = inviter.get("web3Address")
-    if inviter_web3_address:
-        mint_result = await web3_client.mint(inviter_web3_address, 100)
-        await parse_client.create_object("IncentiveLog", {
-            "userId": inviter["objectId"],
-            "web3Address": inviter_web3_address,
-            "type": "invite",
-            "amount": 100,
-            "txHash": mint_result.get("tx_hash"),
-            "description": f"邀请用户 {user['username']} 注册奖励"
-        })
+    # 发放邀请奖励（通过激励服务）
+    reward_result = await incentive_service.grant_invite_register_reward(
+        inviter_id=inviter["objectId"],
+        invitee_name=user.get("username", "新用户")
+    )
     
     return {
         "success": True,
         "message": "邀请人绑定成功",
-        "inviter_name": inviter["username"]
+        "inviter_name": inviter["username"],
+        "reward": {
+            "granted": reward_result.get("success"),
+            "amount": reward_result.get("amount") if reward_result.get("success") else None
+        }
     }
 
 

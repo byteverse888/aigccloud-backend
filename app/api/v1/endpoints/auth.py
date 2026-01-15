@@ -120,7 +120,7 @@ async def login(request: LoginRequest):
             "phone": user_data.get("phone"),
             "role": user_data.get("role", "user"),
             "level": user_data.get("level", 1),
-            "isPaid": user_data.get("isPaid", False),
+            "memberLevel": user_data.get("memberLevel", "normal"),
             "coins": user_data.get("coins", 0),  # 金币余额
             "avatar": user_data.get("avatar"),
             "avatarKey": user_data.get("avatarKey"),
@@ -249,7 +249,7 @@ async def phone_login(request: PhoneLoginRequest):
         "phone": user_data.get("phone"),
         "role": user_data.get("role", "user"),
         "level": user_data.get("level", 1),
-        "isPaid": user_data.get("isPaid", False),
+        "memberLevel": user_data.get("memberLevel", "normal"),
         "coins": user_data.get("coins", 0),
         "avatar": user_data.get("avatar"),
         "avatarKey": user_data.get("avatarKey"),
@@ -327,7 +327,7 @@ async def get_current_user(token: str = Depends(verify_jwt_token)):
                 "phone": user.get("phone"),
                 "role": user.get("role", "user"),
                 "level": user.get("level", 1),
-                "isPaid": user.get("isPaid", False),
+                "memberLevel": user.get("memberLevel", "normal"),
                 "coins": user.get("coins", 0),
                 "avatar": user.get("avatar"),
                 "avatarKey": user.get("avatarKey"),
@@ -505,7 +505,7 @@ def _build_user_response(user_data: dict, session_token: str, address: str):
         "phone": user_data.get("phone"),
         "role": user_data.get("role", "user"),
         "level": user_data.get("level", 1),
-        "isPaid": user_data.get("isPaid", False),
+        "memberLevel": user_data.get("memberLevel", "normal"),
         "coins": user_data.get("coins", 0),
         "avatar": user_data.get("avatar"),
         "avatarKey": user_data.get("avatarKey"),
@@ -545,7 +545,7 @@ async def web3_register(request: Web3LoginRequest):
             "role": "user",
             "level": 1,
             "coins": 100,  # 新用户赠送 100 金币
-            "isPaid": False,
+            "memberLevel": "normal",
         })
         
         if not create_result.get("objectId"):

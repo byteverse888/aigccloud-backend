@@ -10,7 +10,6 @@ from app.core.config import settings
 from app.core.redis_client import redis_client
 from app.core.logger import logger
 from app.api.v1 import router as api_v1_router
-from app.api.v1.endpoints.payment import start_background_order_processor
 
 
 @asynccontextmanager
@@ -26,12 +25,8 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Redis connection failed: {e}")
     
-    # 启动后台订单处理器
-    try:
-        start_background_order_processor()
-        logger.info("后台订单处理器已启动")
-    except Exception as e:
-        logger.error(f"启动后台订单处理器失败: {e}")
+    # 后台任务由 Celery 处理
+    logger.info("后台任务由 Celery Worker 处理")
     
     yield
     

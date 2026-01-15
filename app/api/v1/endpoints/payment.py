@@ -12,8 +12,9 @@ from datetime import datetime, timedelta
 from app.core.parse_client import parse_client
 from app.core.web3_client import web3_client
 from app.core.security import generate_order_no
-from app.core.deps import get_current_user_id
+from app.core.deps import get_current_user_id, get_optional_parse_user
 from app.core.config import settings
+from app.core.incentive_service import incentive_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -59,11 +60,105 @@ class VerifyTransferRequest(BaseModel):
     tx_hash: str
 
 
+class CreateOrderRequest(BaseModel):
+    user_id: str
+    amount: float
+    type: str  # subscription, recharge, purchase
+    plan: Optional[str] = None
+    product_id: Optional[str] = None
+    payment_method: Optional[str] = "web3"
+
+
 class OrderResponse(BaseModel):
     order_id: str
     order_no: str
     amount: float
     status: str
+
+
+# ============ 创建订单 ============
+
+@router.post("/create-order")
+async def create_order(
+    request: CreateOrderRequest,
+    parse_user: Optional[dict] = Depends(get_optional_parse_user)
+):
+    """
+    创建订单（订阅/充值/购买）
+    """
+    logger.info(f"[创建订单] 请求参数: user_id={request.user_id}, type={request.type}, amount={request.amount}")
+    
+    # 验证用户身份
+    user = parse_user
+    if user:
+        # 有 session token，验证用户 ID 是否匹配
+        session_user_id = user.get("objectId")
+        if session_user_id != request.user_id:
+            logger.warning(f"[创建订单] 用户ID不匹配: session={session_user_id}, request={request.user_id}")
+            raise HTTPException(status_code=401, detail="用户身份不匹配")
+        logger.info(f"[创建订单] Session验证成功: {user.get('username')}")
+    else:
+        # 无 session token，向后兼容
+        logger.info(f"[创建订单] 无Session，使用 user_id 创建订单")
+    
+    # 获取订单金额和详情
+    amount = request.amount
+    description = ""
+    coins = 0
+    plan_key = None
+    
+    if request.type == "subscription" and request.plan:
+        plan = SUBSCRIPTION_PLANS.get(request.plan)
+        if plan:
+            amount = plan["price"]
+            description = f"订阅{plan['name']}"
+            coins = plan["coins"]
+            plan_key = request.plan
+    elif request.type == "recharge":
+        description = f"充值{amount}元"
+        coins = int(amount * 100)  # 1元 = 100金币
+    elif request.type == "purchase":
+        description = "购买商品"
+    
+    # 生成订单号
+    order_no = generate_order_no()
+    
+    # 创建订单
+    order_data = {
+        "orderNo": order_no,
+        "userId": request.user_id,
+        "type": request.type,
+        "amount": amount,
+        "coins": coins,
+        "status": OrderStatus.PENDING.value,
+        "description": description,
+        "paymentMethod": request.payment_method,
+    }
+    
+    if plan_key:
+        order_data["plan"] = plan_key
+    if request.product_id:
+        order_data["productId"] = request.product_id
+    
+    result = await parse_client.create_object("Order", order_data)
+    order_id = result.get("objectId")
+    
+    logger.info(f"[创建订单] 订单创建成功: {order_id}, 类型: {request.type}, 金额: {amount}")
+    
+    return {
+        "success": True,
+        "order_id": order_id,
+        "order_no": order_no,
+        "amount": amount,
+        "coins": coins,
+        "status": OrderStatus.PENDING.value,
+        "description": description,
+        # Web3支付信息
+        "web3_payment": {
+            "to_address": settings.web3_operator_address,  # 运营账户地址
+            "amount_eth": amount,  # 转账金额（ETH）
+        }
+    }
 
 
 # ============ 订阅计划 ============
@@ -340,6 +435,23 @@ async def verify_web3_transfer(request: VerifyTransferRequest):
         })
         logger.info(f"[验证转账] 订单已完成: {request.order_id}, txHash: {request.tx_hash[:16]}...")
         
+        # 11. 发放充值奖励（如果是购买订单）
+        try:
+            user_id = order.get("userId")
+            order_amount = float(order.get("amount", 0))
+            if user_id and order_amount > 0:
+                reward_result = await incentive_service.grant_recharge_reward(
+                    user_id=user_id,
+                    recharge_amount=order_amount,
+                    order_id=request.order_id
+                )
+                if reward_result.get("success"):
+                    logger.info(f"[验证转账] 充值奖励已发放: {reward_result.get('amount')} 金币")
+                else:
+                    logger.warning(f"[验证转账] 充值奖励发放失败: {reward_result.get('error')}")
+        except Exception as e:
+            logger.error(f"[验证转账] 发放充值奖励异常: {e}")
+        
         return {
             "success": True,
             "message": "订单已完成",
@@ -411,45 +523,10 @@ async def mock_pay_order(order_id: str):
     return {"success": True, "message": "模拟支付成功", "order_id": order_id, "status": "completed"}
 
 
-# ============ 订阅处理 ============
+# ============ 订阅处理（已迁移到 member.py） ============
 
-async def process_subscription(user_id: str, plan_key: str):
-    """处理订阅逻辑"""
-    plan = SUBSCRIPTION_PLANS.get(plan_key)
-    if not plan:
-        return {"success": False, "error": "无效的订阅计划"}
-    
-    user = await parse_client.get_user(user_id)
-    current_expire = user.get("paidExpireAt")
-    
-    if current_expire:
-        expire_date = datetime.fromisoformat(current_expire.replace("Z", "+00:00"))
-        if expire_date > datetime.now(expire_date.tzinfo):
-            new_expire = expire_date + timedelta(days=plan["days"])
-        else:
-            new_expire = datetime.now() + timedelta(days=plan["days"])
-    else:
-        new_expire = datetime.now() + timedelta(days=plan["days"])
-    
-    await parse_client.update_user(user_id, {
-        "isPaid": True,
-        "paidExpireAt": new_expire.isoformat(),
-    })
-    
-    # 发放金币
-    web3_address = user.get("web3Address")
-    if web3_address and plan["coins"] > 0:
-        mint_result = await web3_client.mint(web3_address, plan["coins"])
-        await parse_client.create_object("IncentiveLog", {
-            "userId": user_id,
-            "web3Address": web3_address,
-            "type": "subscription",
-            "amount": plan["coins"],
-            "txHash": mint_result.get("tx_hash"),
-            "description": f"订阅{plan['name']}赠送金币"
-        })
-    
-    return {"success": True, "new_expire": new_expire.isoformat()}
+# 注意: 订阅处理逻辑已迁移到 member.py
+# 请使用 /api/v1/member/subscribe 接口
 
 
 # ============ 后台协程：处理支付中订单 ============
@@ -571,5 +648,5 @@ async def background_order_processor(interval: int = 60):
 
 def start_background_order_processor():
     """启动后台订单处理器"""
-    asyncio.create_task(background_order_processor(interval=60))
+    asyncio.create_task(background_order_processor(interval=300))  # 5分钟间隔
     logger.info("[后台任务] 订单处理器已加入任务队列")

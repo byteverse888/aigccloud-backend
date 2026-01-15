@@ -136,9 +136,82 @@ class ParseClient:
         """获取用户信息"""
         return await self._request("GET", f"/users/{user_id}")
     
+    async def get_current_user(self, session_token: str) -> Dict[str, Any]:
+        """通过 session token 获取当前用户信息"""
+        headers = {
+            **self.headers,
+            "X-Parse-Session-Token": session_token,
+        }
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{self.base_url}/users/me",
+                headers=headers,
+                timeout=30.0
+            )
+            response.raise_for_status()
+            return response.json()
+    
+    async def validate_session(self, session_token: str, expected_user_id: Optional[str] = None) -> Dict[str, Any]:
+        """
+        验证 session token 并检查用户匹配
+        
+        Args:
+            session_token: Parse session token
+            expected_user_id: 预期的用户 ID，如果提供则验证是否匹配
+            
+        Returns:
+            用户信息字典
+            
+        Raises:
+            HTTPException: session 无效或用户不匹配
+        """
+        try:
+            user = await self.get_current_user(session_token)
+            user_id = user.get("objectId")
+            
+            # 如果提供了预期的用户 ID，验证是否匹配
+            if expected_user_id and user_id != expected_user_id:
+                logger.warning(f"[Session验证] 用户ID不匹配: session对应{user_id}, 请求的{expected_user_id}")
+                raise ValueError("用户身份不匹配")
+            
+            logger.debug(f"[Session验证] 成功: user_id={user_id}, username={user.get('username')}")
+            return user
+        except httpx.HTTPStatusError as e:
+            logger.warning(f"[Session验证] 失败: {e.response.status_code}")
+            raise ValueError("Session无效或已过期")
+        except Exception as e:
+            logger.error(f"[Session验证] 异常: {e}")
+            raise
+    
     async def update_user(self, user_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
-        """更新用户信息"""
+        """更新用户信息（需要 Master Key 或正确的 Session Token）"""
         return await self._request("PUT", f"/users/{user_id}", data)
+    
+    async def update_user_with_session(self, user_id: str, data: Dict[str, Any], session_token: str) -> Dict[str, Any]:
+        """使用 session token 更新用户信息"""
+        headers = {
+            **self.headers,
+            "X-Parse-Session-Token": session_token,
+        }
+        url = f"{self.base_url}/users/{user_id}"
+        logger.info(f"[Parse] 更新用户(session): {user_id}, 数据: {data}")
+        
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.put(
+                    url,
+                    headers=headers,
+                    json=data,
+                    timeout=30.0
+                )
+                logger.info(f"[Parse] 更新用户响应: {response.status_code}")
+                if response.status_code >= 400:
+                    logger.error(f"[Parse] 更新用户失败: {response.text}")
+                response.raise_for_status()
+                return response.json()
+            except Exception as e:
+                logger.error(f"[Parse] 更新用户异常: {e}")
+                raise
     
     async def query_users(
         self, 

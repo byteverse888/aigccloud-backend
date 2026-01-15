@@ -63,8 +63,8 @@ class UserResponse(BaseModel):
     email: str
     role: str
     level: int
-    is_paid: bool
-    paid_expire_at: Optional[datetime] = None
+    member_level: str = "normal"  # normal, vip, svip
+    member_expire_at: Optional[datetime] = None
     web3_address: Optional[str] = None
     invite_count: int = 0
     success_reg_count: int = 0
@@ -148,7 +148,7 @@ async def register_phone(request: PhoneRegisterRequest):
         "phone": phone,
         "role": "user",
         "level": 1,
-        "isPaid": False,
+        "memberLevel": "normal",
         "inviteCount": 0,
         "successRegCount": 0,
         "totalIncentive": 0,
@@ -224,7 +224,7 @@ async def activate_user(token: str):
     extra_data = {
         "role": "user",
         "level": 1,
-        "isPaid": False,
+        "memberLevel": "normal",
         "inviteCount": 0,
         "successRegCount": 0,
         "totalIncentive": 0,
@@ -381,8 +381,8 @@ async def get_current_user(user_id: str = Depends(get_current_user_id)):
             email=user.get("email", ""),
             role=user.get("role", "user"),
             level=user.get("level", 1),
-            is_paid=user.get("isPaid", False),
-            paid_expire_at=user.get("paidExpireAt"),
+            member_level=user.get("memberLevel", "normal"),
+            member_expire_at=user.get("memberExpireAt"),
             web3_address=user.get("web3Address"),
             invite_count=user.get("inviteCount", 0),
             success_reg_count=user.get("successRegCount", 0),
@@ -404,8 +404,8 @@ async def get_user(user_id: str):
             email=user.get("email", ""),
             role=user.get("role", "user"),
             level=user.get("level", 1),
-            is_paid=user.get("isPaid", False),
-            paid_expire_at=user.get("paidExpireAt"),
+            member_level=user.get("memberLevel", "normal"),
+            member_expire_at=user.get("memberExpireAt"),
             web3_address=user.get("web3Address"),
             invite_count=user.get("inviteCount", 0),
             success_reg_count=user.get("successRegCount", 0),
@@ -448,16 +448,18 @@ async def check_membership(user_id: str):
     """
     try:
         user = await parse_client.get_user(user_id)
-        is_paid = user.get("isPaid", False)
-        paid_expire_at = user.get("paidExpireAt")
+        member_level = user.get("memberLevel", "normal")
+        member_expire_at = user.get("memberExpireAt")
         
         # 检查是否过期
-        if is_paid and paid_expire_at:
-            expire_date = datetime.fromisoformat(paid_expire_at.replace("Z", "+00:00"))
+        is_expired = False
+        if member_level != "normal" and member_expire_at:
+            expire_date = datetime.fromisoformat(member_expire_at.replace("Z", "+00:00"))
             if expire_date < datetime.now(expire_date.tzinfo):
-                is_paid = False
+                is_expired = True
                 # 更新用户状态
-                await parse_client.update_user(user_id, {"isPaid": False})
+                await parse_client.update_user(user_id, {"memberLevel": "normal"})
+                member_level = "normal"
         
         # 从联盟链获取余额
         web3_address = user.get("web3Address")
@@ -466,8 +468,9 @@ async def check_membership(user_id: str):
             coins = await web3_client.get_balance(web3_address)
         
         return {
-            "is_paid": is_paid,
-            "paid_expire_at": paid_expire_at,
+            "member_level": member_level,
+            "member_expire_at": member_expire_at,
+            "is_expired": is_expired,
             "coins": coins,
             "web3_address": web3_address,
         }

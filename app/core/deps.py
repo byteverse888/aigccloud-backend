@@ -1,7 +1,7 @@
 """
 依赖注入
 """
-from typing import Optional
+from typing import Optional, Dict, Any
 from fastapi import Header, HTTPException, status
 from app.core.security import verify_jwt_token
 from app.core.parse_client import parse_client
@@ -72,3 +72,60 @@ async def get_admin_user_id(
         )
     
     return user_id
+
+
+# ============ Parse Session Token 验证 ============
+
+async def get_parse_user(
+    parse_session: Optional[str] = Header(None, alias="X-Parse-Session-Token"),
+    user_id: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    通过 Parse Session Token 获取并验证用户
+    
+    Args:
+        parse_session: Parse session token（从请求头获取）
+        user_id: 预期的用户 ID，用于验证身份匹配
+        
+    Returns:
+        用户信息字典
+        
+    Raises:
+        HTTPException: 未提供 token、token 无效或用户不匹配
+    """
+    if not parse_session:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="未提供会话令牌"
+        )
+    
+    try:
+        user = await parse_client.validate_session(parse_session, user_id)
+        return user
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=str(e)
+        )
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="会话验证失败"
+        )
+
+
+async def get_optional_parse_user(
+    parse_session: Optional[str] = Header(None, alias="X-Parse-Session-Token")
+) -> Optional[Dict[str, Any]]:
+    """
+    可选的 Parse Session Token 验证
+    
+    如果提供了 token 则验证并返回用户信息，否则返回 None
+    """
+    if not parse_session:
+        return None
+    
+    try:
+        return await parse_client.get_current_user(parse_session)
+    except Exception:
+        return None
