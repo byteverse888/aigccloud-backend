@@ -15,9 +15,16 @@ class ParseClient:
         self.base_url = settings.parse_server_url
         self.app_id = settings.parse_app_id
         self.rest_api_key = settings.parse_rest_api_key
+        self.master_key = settings.parse_master_key
         self.headers = {
             "X-Parse-Application-Id": self.app_id,
             "X-Parse-REST-API-Key": self.rest_api_key,
+            "Content-Type": "application/json",
+        }
+        # 需要 Master Key 的请求使用此 headers
+        self.master_headers = {
+            "X-Parse-Application-Id": self.app_id,
+            "X-Parse-Master-Key": self.master_key,
             "Content-Type": "application/json",
         }
     
@@ -187,6 +194,28 @@ class ParseClient:
         """更新用户信息（需要 Master Key 或正确的 Session Token）"""
         return await self._request("PUT", f"/users/{user_id}", data)
     
+    async def update_user_with_master_key(self, user_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
+        """使用 Master Key 更新用户信息（用于 emailVerified 等敏感字段）"""
+        url = f"{self.base_url}/users/{user_id}"
+        logger.info(f"[Parse] 更新用户(Master): {user_id}, 数据: {data}")
+        
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.put(
+                    url,
+                    headers=self.master_headers,
+                    json=data,
+                    timeout=30.0
+                )
+                logger.info(f"[Parse] 更新用户响应: {response.status_code}")
+                if response.status_code >= 400:
+                    logger.error(f"[Parse] 更新用户失败: {response.text}")
+                response.raise_for_status()
+                return response.json()
+            except Exception as e:
+                logger.error(f"[Parse] 更新用户异常: {e}")
+                raise
+    
     async def update_user_with_session(self, user_id: str, data: Dict[str, Any], session_token: str) -> Dict[str, Any]:
         """使用 session token 更新用户信息"""
         headers = {
@@ -220,14 +249,35 @@ class ParseClient:
         limit: int = 100,
         skip: int = 0
     ) -> Dict[str, Any]:
-        """查询用户列表"""
+        """查询用户列表
+        
+        使用 Master Key 查询 /classes/_User
+        """
         import json
         params = {"limit": limit, "skip": skip}
         if where:
             params["where"] = json.dumps(where)
         if order:
             params["order"] = order
-        return await self._request("GET", "/users", params=params)
+        
+        # 使用 Master Key 查询
+        url = f"{self.base_url}/classes/_User"
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.get(
+                    url,
+                    headers=self.master_headers,
+                    params=params,
+                    timeout=30.0
+                )
+                logger.debug(f"[Parse] 查询用户: {response.status_code}")
+                if response.status_code >= 400:
+                    logger.error(f"[Parse] 查询用户失败: {response.text}")
+                response.raise_for_status()
+                return response.json()
+            except Exception as e:
+                logger.error(f"[Parse] 查询用户异常: {str(e)}")
+                raise
     
     # ============ 云函数调用 ============
     

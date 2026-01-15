@@ -297,6 +297,43 @@ class Web3Client:
             return {"success": False, "tx_status": "confirmed", "error": "转账金额不足"}
         
         return {"success": True, "verified": True, "tx_status": "confirmed"}
+    
+    async def create_account(self, user_id: str, password: Optional[str] = None) -> dict:
+        """
+        调用链上 personal_newAccount 创建钱包
+        
+        Args:
+            user_id: 用户ID，用于日志
+            password: 可选的密码，用于加密钱包
+            
+        Returns:
+            {"success": bool, "address": str} 或 {"success": bool, "error": str}
+        """
+        from app.core.logger import logger
+        
+        if not self.rpc_url:
+            # 开发环境模拟返回
+            mock_address = f"0x{user_id[:8].lower().zfill(40)}"
+            logger.info(f"[Web3] 模拟创建钱包: {user_id} -> {mock_address}")
+            return {"success": True, "address": mock_address}
+        
+        try:
+            # 调用 personal_newAccount
+            params = [password] if password else [""]
+            result = await self._call_rpc("personal_newAccount", params)
+            
+            address = result.get("result")
+            if not address:
+                error = result.get("error", {}).get("message", "创建钱包失败")
+                logger.error(f"[Web3] 创建钱包失败: {user_id} - {error}")
+                return {"success": False, "error": error}
+            
+            logger.info(f"[Web3] 钱包创建成功: {user_id} -> {address}")
+            return {"success": True, "address": address}
+            
+        except Exception as e:
+            logger.error(f"[Web3] 创建钱包异常: {user_id} - {str(e)}")
+            return {"success": False, "error": str(e)}
 
 
 # 全局单例

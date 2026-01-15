@@ -25,11 +25,13 @@ class Settings(BaseSettings):
     parse_server_url: str = "http://localhost:1337/parse"
     parse_app_id: str = "aigccloud"
     parse_rest_api_key: str = "restapi_service_key"
+    parse_master_key: str = "master_key_for_server"  # Master Key，用于服务端高权限操作
+    parse_js_key: str = "jskey_client"  # 客户端动态获取的 JS Key
 
     # JWT
-    jwt_secret_key: str = "your-secret-key"
+    jwt_secret_key: str = "your-secret-key-256bits-random-string"  # 256位随机字符串
     jwt_algorithm: str = "HS256"
-    jwt_access_token_expire_minutes: int = 30
+    jwt_access_token_expire_minutes: int = 1440  # 24小时
 
     # WeChat Pay (测试数据)
     wechat_app_id: str = "wx_test_appid"

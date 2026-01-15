@@ -53,6 +53,13 @@ class RedisClient:
         """设置值，ex为过期时间(秒)"""
         return await self.client.set(key, value, ex=ex)
     
+    async def setnx(self, key: str, value: Any, ex: Optional[int] = None) -> bool:
+        """原子操作: 仅当键不存在时设置值，返回是否设置成功"""
+        result = await self.client.setnx(key, value)
+        if result and ex:
+            await self.client.expire(key, ex)
+        return result
+    
     async def delete(self, key: str) -> int:
         """删除键"""
         return await self.client.delete(key)
