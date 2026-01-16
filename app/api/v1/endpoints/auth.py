@@ -3,6 +3,7 @@
 """
 import uuid
 import json
+import secrets
 from fastapi import APIRouter, HTTPException, Depends, Request, Header
 from pydantic import BaseModel
 from typing import Optional
@@ -385,15 +386,27 @@ async def get_current_user(token: str = Depends(verify_jwt_token)):
 
 
 @router.get("/config")
-async def get_parse_config():
+async def get_parse_config(authorization: Optional[str] = Header(None)):
     """
-    获取Parse配置（公开信息）
-    注意：不包含敏感信息
+    获取Parse配置（需要JWT认证）
+    返回 parse_config 包含 appId 和 jsKey
     """
+    # 验证 JWT Token
+    if not authorization or not authorization.startswith('Bearer '):
+        raise HTTPException(status_code=401, detail="未提供认证Token")
+    
+    token = authorization.replace('Bearer ', '')
+    try:
+        verify_jwt_token(token)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Token无效")
+    
     return {
-        "serverUrl": settings.parse_server_url,
-        "appId": settings.parse_app_id,
-        # 不返回 master_key 或 js_key
+        "parse_config": {
+            "serverUrl": settings.parse_server_url,
+            "appId": settings.parse_app_id,
+            "jsKey": settings.parse_js_key,
+        }
     }
 
 
@@ -463,8 +476,8 @@ async def _generate_unique_nonce(address: str) -> str:
     raise HTTPException(status_code=500, detail="Nonce 生成失败，请重试")
 
 
-@router.post("/web3/nonce")
-async def web3_get_nonce(request: Web3InitRequest):
+@router.get("/web3/nonce")
+async def web3_get_nonce(address: str):
     """
     申请 Nonce - Electron 客户端专用
     
@@ -472,9 +485,9 @@ async def web3_get_nonce(request: Web3InitRequest):
     - 存入 Redis，15 分钟有效
     - 返回 nonce 和过期时间
     """
-    logger.info(f"[Web3] 申请Nonce: {request.address[:10]}...")
+    logger.info(f"[Web3] 申请Nonce: {address[:10]}...")
     
-    address = validate_eth_address(request.address)
+    address = validate_eth_address(address)
     nonce = await _generate_unique_nonce(address)
     
     logger.info(f"[Web3] Nonce已生成: {address[:10]}... -> {nonce[:8]}...")
@@ -645,12 +658,19 @@ async def web3_register(request: Web3LoginRequest):
     if session_token and user_id:
         await _update_last_login(user_id, session_token, address)
     
+    # 生成 JWT（包含 session_token）
+    jwt_token = create_access_token(data={
+        "user_id": user_id,
+        "address": address,
+        "session_token": session_token,
+    })
+    
     # 构建响应
     safe_user, parse_config = _build_user_response(user_data, session_token, address)
     
     return {
         "success": True,
-        "token": session_token,
+        "token": jwt_token,  # 返回 JWT
         "user": safe_user,
         "parse_config": parse_config,
         "is_new_user": True,
@@ -706,21 +726,43 @@ async def web3_login(request: Web3LoginRequest):
         if session_token and user_id:
             await _update_last_login(user_id, session_token, address)
         
+        # 生成 JWT（包含 session_token）
+        jwt_token = create_access_token(data={
+            "user_id": user_id,
+            "address": address,
+            "session_token": session_token,
+        })
+        
         # 构建响应
         safe_user, parse_config = _build_user_response(user_data, session_token, address)
         
         return {
             "success": True,
-            "token": session_token,
+            "token": jwt_token,  # 返回 JWT
             "user": safe_user,
             "parse_config": parse_config,
             "is_new_user": False,
             "message": "登录成功"
         }
     else:
-        # Parse 错误码 101 不区分用户不存在还是密码错误
-        logger.warning(f"[Web3] 登录失败: {address[:10]}...")
-        raise HTTPException(status_code=401, detail="该地址未注册或密码不对，请确认")
+        # 解析 Parse Server 错误信息
+        try:
+            error_data = response.json()
+            error_code = error_data.get("code")
+            error_msg = error_data.get("error", "登录失败")
+            
+            logger.warning(f"[Web3] 登录失败: {address[:10]}... - code={error_code}, error={error_msg}")
+            
+            # Parse 错误码：101=用户名密码错误
+            if error_code == 101:
+                raise HTTPException(status_code=401, detail="该地址未注册或密码错误")
+            else:
+                raise HTTPException(status_code=401, detail=error_msg)
+        except ValueError:
+            # 无法解析 JSON
+            error_text = response.text
+            logger.warning(f"[Web3] 登录失败: {address[:10]}... - status={response.status_code}, error={error_text}")
+            raise HTTPException(status_code=401, detail="登录失败，请检查账户和密码")
 
 
 
@@ -729,22 +771,57 @@ async def web3_logout(
     authorization: Optional[str] = Header(None)
 ):
     """
-    Web3 登出 - 撤销 JWT
+    Web3 登出 - 清除 JWT 和 Parse sessionToken
     
-    客户端应该:
-    1. 清除本地存储的 JWT
-    2. 清除内存中的 Parse 密钥缓存
-    
-    服务端可选:
-    - 将 JWT 加入黑名单 (Redis)
+    流程：
+    1. 验证 JWT ，获取 session_token
+    2. 调用 Parse Server 撤销 sessionToken
+    3. 客户端清除本地存储
     """
-    if authorization and authorization.startswith("Bearer "):
-        token = authorization[7:]
-        # 可选: 将 token 加入黑名单
-        # await redis_client.set(f"jwt_blacklist:{token}", "1", ex=86400)
-        logger.info(f"[Web3] 登出: token={token[:20]}...")
+    import httpx
     
-    return {
-        "success": True,
-        "message": "登出成功"
-    }
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="未提供认证Token")
+    
+    token = authorization[7:]
+    
+    try:
+        # 解析 JWT 获取 session_token
+        payload = verify_jwt_token(token)
+        session_token = payload.get("session_token")
+        
+        if not session_token:
+            logger.warning("[Web3] 登出失败: JWT 中未找到 session_token")
+            raise HTTPException(status_code=400, detail="无效的认证Token")
+        
+        # 调用 Parse Server 登出接口撤销 sessionToken
+        logout_url = f"{settings.parse_server_url}/logout"
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                logout_url,
+                headers={
+                    "X-Parse-Application-Id": settings.parse_app_id,
+                    "X-Parse-REST-API-Key": settings.parse_rest_api_key,
+                    "X-Parse-Session-Token": session_token,
+                },
+                timeout=10.0
+            )
+        
+        if response.status_code == 200:
+            logger.info(f"[Web3] 登出成功: session_token={session_token[:20]}...")
+        else:
+            logger.warning(f"[Web3] Parse 登出失败: status={response.status_code}")
+        
+        # 可选：将 JWT 加入黑名单
+        # await redis_client.set(f"jwt_blacklist:{token}", "1", ex=86400)
+        
+        return {
+            "success": True,
+            "message": "登出成功"
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[Web3] 登出异常: {e}")
+        raise HTTPException(status_code=500, detail="登出失败")
