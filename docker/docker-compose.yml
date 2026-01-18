@@ -221,6 +221,9 @@ services:
 volumes:
   postgres_data:
   redis_data:
+  rustfs_data:
+  logs:
+
 
 networks:
   default:

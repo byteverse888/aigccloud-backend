@@ -17,13 +17,13 @@ FastAPI后端服务，为AIGC云平台提供核心业务逻辑处理。
 pip install -r requirements.txt
 
 # 启动服务
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8882
 或
-python -m uvicorn app.main:app --reload --port 8000
+python -m uvicorn app.main:app --reload --port 8882
 ```
 
 ## API文档
 
 启动服务后访问：
-- Swagger UI: http://localhost:8000/docs
-- ReDoc: http://localhost:8000/redoc
+- Swagger UI: http://localhost:8882/docs
+- ReDoc: http://localhost:8882/redoc
