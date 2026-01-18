@@ -19,7 +19,7 @@ pip install -r requirements.txt
 # 启动服务
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8882
 或
-python -m uvicorn app.main:app --reload --port 8882
+python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8882
 ```
 
 ## API文档
