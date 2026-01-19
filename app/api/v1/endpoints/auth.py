@@ -425,6 +425,7 @@ async def email_activate(token: str):
     
     # 在 Parse 中创建用户
     try:
+        # 1. 先创建用户（不带 emailVerified，因为客户端 REST API 不允许手动设置该字段）
         create_result = await parse_client.create_user({
             "username": email,  # 邮箱作为用户名
             "email": email,
@@ -433,13 +434,21 @@ async def email_activate(token: str):
             "level": 1,
             "coins": 100,  # 新用户赠送 100 金币
             "memberLevel": "normal",
-            "emailVerified": True,  # 既然通过链接激活，标记为已验证
         })
         
         if not create_result.get("objectId"):
             raise HTTPException(status_code=500, detail="激活失败，创建用户记录失败")
             
         user_id = create_result.get("objectId")
+        
+        # 2. 使用 Master Key 手动标记邮箱已验证
+        try:
+            await parse_client.update_user_with_master_key(user_id, {"emailVerified": True})
+            logger.info(f"[Auth] 邮箱已通过 Master Key 标记为已验证: {email}")
+        except Exception as e:
+            logger.warning(f"[Auth] 标记邮箱验证失败 (Master Key): {str(e)}")
+            # 即使这一步失败了，用户已经创建成功，不影响核心逻辑
+            
         logger.info(f"[Auth] 邮箱激活成功: {email} (ID: {user_id})")
         
         # 删除 Token
