@@ -13,10 +13,12 @@ from web3 import Web3
 
 from app.core.parse_client import parse_client
 from app.core.redis_client import redis_client
+from app.core.email_client import email_client
 from app.core.security import (
     create_access_token,
     verify_jwt_token,
     generate_sms_code,
+    generate_activation_token,
 )
 from app.core.config import settings
 from app.core.logger import logger
@@ -316,6 +318,208 @@ async def phone_login(request: PhoneLoginRequest):
         "user": safe_user,
         "message": "登录成功"
     }
+
+
+@router.post("/email/register")
+async def email_register(request: EmailRegisterRequest, req: Request):
+    """
+    邮箱注册
+    1. 检查邮箱是否已存在
+    2. 生成激活Token
+    3. 存储到Redis
+    4. 发送激活邮件
+    """
+    logger.info(f"[Auth] 邮箱注册请求: {request.email}")
+    
+    # 检查 Parse 是否已有该邮箱
+    existing = await parse_client.query_users(where={"email": request.email})
+    if existing.get("results"):
+        logger.warning(f"[Auth] 注册失败: 邮箱已存在 {request.email}")
+        raise HTTPException(status_code=400, detail="该邮箱已注册")
+    
+    # 生成激活Token
+    token = generate_activation_token()
+    
+    # 存储注册信息到Redis (24小时有效)
+    user_data = {
+        "email": request.email,
+        "password": request.password,
+        "created_at": datetime.now().isoformat()
+    }
+    await redis_client.set_activation_token(token, user_data, ex=86400)
+    
+    # 发送激活邮件
+    base_url = str(req.base_url).rstrip("/")
+    # 使用专门的 auth 激活链接
+    activation_link = f"{base_url}/api/v1/auth/email/activate?token={token}"
+    
+    subject = "【巴特星球】账号激活"
+    body = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <style>
+            body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
+            .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+            .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }}
+            .content {{ background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px; }}
+            .button {{ display: inline-block; background: #667eea; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; margin: 20px 0; }}
+            .footer {{ text-align: center; color: #999; margin-top: 20px; font-size: 12px; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h1>欢迎加入巴特星球</h1>
+            </div>
+            <div class="content">
+                <p>亲爱的用户，</p>
+                <p>感谢您注册巴特星球AIGC云平台！请点击下方按钮激活您的账号：</p>
+                <p style="text-align: center;">
+                    <a href="{activation_link}" class="button">激活账号</a>
+                </p>
+                <p>或者复制以下链接到浏览器：</p>
+                <p style="word-break: break-all; color: #666;">{activation_link}</p>
+                <p>此链接24小时内有效。</p>
+                <p>如果您没有注册过账号，请忽略此邮件。</p>
+            </div>
+            <div class="footer">
+                <p>© 2026 巴特星球 - AIGC云平台</p>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+    
+    await email_client.send(request.email, subject, body)
+    
+    return {
+        "success": True, 
+        "message": "注册申请已提交，请进入邮箱点击激活链接完成注册"
+    }
+
+
+@router.get("/email/activate")
+async def email_activate(token: str):
+    """
+    邮箱激活
+    1. 验证Token
+    2. 创建 Parse User (email作为username)
+    3. 发放初始金币
+    """
+    logger.info(f"[Auth] 邮箱激活请求: token={token[:10]}...")
+    
+    user_data = await redis_client.get_activation_token(token)
+    if not user_data:
+        raise HTTPException(status_code=400, detail="激活链接无效或已过期")
+    
+    email = user_data["email"]
+    password = user_data["password"]
+    
+    # 再次检查是否已被注册（防止在等待激活期间被注册）
+    existing = await parse_client.query_users(where={"email": email})
+    if existing.get("results"):
+        await redis_client.delete_activation_token(token)
+        raise HTTPException(status_code=400, detail="该邮箱已被激活或注册")
+    
+    # 在 Parse 中创建用户
+    try:
+        create_result = await parse_client.create_user({
+            "username": email,  # 邮箱作为用户名
+            "email": email,
+            "password": password,
+            "role": "user",
+            "level": 1,
+            "coins": 100,  # 新用户赠送 100 金币
+            "memberLevel": "normal",
+            "emailVerified": True,  # 既然通过链接激活，标记为已验证
+        })
+        
+        if not create_result.get("objectId"):
+            raise HTTPException(status_code=500, detail="激活失败，创建用户记录失败")
+            
+        user_id = create_result.get("objectId")
+        logger.info(f"[Auth] 邮箱激活成功: {email} (ID: {user_id})")
+        
+        # 删除 Token
+        await redis_client.delete_activation_token(token)
+        
+        # 返回一个简单的 HTML 成功页面或重定向
+        from fastapi.responses import HTMLResponse
+        return HTMLResponse(content=f"""
+        <html>
+            <body style="text-align: center; padding-top: 50px; font-family: sans-serif;">
+                <h1 style="color: #52c41a;">激活成功！</h1>
+                <p>您的账号 {email} 已成功激活。</p>
+                <p>现在您可以返回应用进行登录了。</p>
+            </body>
+        </html>
+        """)
+        
+    except Exception as e:
+        logger.error(f"[Auth] 激活异常: {str(e)}")
+        raise HTTPException(status_code=500, detail="激活过程中发生异常")
+
+
+@router.post("/email/login")
+async def email_login(request: EmailLoginRequest):
+    """
+    邮箱登录
+    1. 使用 Parse 登录接口验证 (email作为username)
+    2. 生成 JWT
+    """
+    import httpx
+    logger.info(f"[Auth] 邮箱登录请求: {request.email}")
+    
+    login_url = f"{settings.parse_server_url}/login"
+    login_headers = {
+        "X-Parse-Application-Id": settings.parse_app_id,
+        "X-Parse-REST-API-Key": settings.parse_rest_api_key,
+        "X-Parse-Revocable-Session": "1",
+    }
+    
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            login_url,
+            params={"username": request.email, "password": request.password},
+            headers=login_headers,
+            timeout=30.0
+        )
+    
+    if response.status_code == 200:
+        user_data = response.json()
+        session_token = user_data.get("sessionToken")
+        user_id = user_data.get("objectId")
+        
+        logger.info(f"[Auth] 邮箱登录成功: {request.email} (ID: {user_id})")
+        
+        # 更新登录时间
+        if session_token and user_id:
+            await _update_last_login(user_id, session_token, request.email)
+            
+        # 生成 JWT
+        jwt_token = create_access_token(data={
+            "sub": user_id,
+            "user_id": user_id,
+            "email": request.email,
+            "session_token": session_token,
+            "parse_session": session_token,
+        })
+        
+        # 构建响应
+        safe_user, parse_config = _build_user_response(user_data, session_token, "") # 邮箱登录暂无 address
+        
+        return {
+            "success": True,
+            "token": jwt_token,
+            "user": safe_user,
+            "parse_config": parse_config,
+            "message": "登录成功"
+        }
+    else:
+        logger.warning(f"[Auth] 邮箱登录失败: {request.email} - status={response.status_code}")
+        raise HTTPException(status_code=401, detail="邮箱或密码错误")
 
 
 @router.post("/logout")
@@ -728,9 +932,11 @@ async def web3_login(request: Web3LoginRequest):
         
         # 生成 JWT（包含 session_token）
         jwt_token = create_access_token(data={
+            "sub": user_id,
             "user_id": user_id,
             "address": address,
             "session_token": session_token,
+            "parse_session": session_token,
         })
         
         # 构建响应
@@ -787,8 +993,12 @@ async def web3_logout(
     
     try:
         # 解析 JWT 获取 session_token
-        payload = verify_jwt_token(token)
-        session_token = payload.get("session_token")
+        from app.core.security import decode_access_token
+        payload = decode_access_token(token)
+        if not payload:
+            raise HTTPException(status_code=401, detail="Token无效")
+            
+        session_token = payload.get("session_token") or payload.get("parse_session")
         
         if not session_token:
             logger.warning("[Web3] 登出失败: JWT 中未找到 session_token")
