@@ -57,6 +57,26 @@ class SetNewPasswordRequest(BaseModel):
     new_password: str
 
 
+class CreateWalletRequest(BaseModel):
+    """创建钱包请求"""
+    web3_address: str
+    encrypted_keystore: str  # 加密后的 keystore JSON 字符串
+
+
+class ImportWalletRequest(BaseModel):
+    """导入钱包请求"""
+    web3_address: str
+    encrypted_keystore: str  # 加密后的 keystore JSON 字符串
+
+
+class TransferRequest(BaseModel):
+    """转账请求"""
+    to_address: str
+    amount: str  # 转账金额（ETH）
+    password: str  # 钱包密码，用于解密 keystore
+
+
+
 class UserResponse(BaseModel):
     id: str
     username: str
@@ -508,12 +528,203 @@ async def list_users(
         "page": page,
         "limit": limit
     }
+
+
+# ============ 钱包管理端点 ============
+
+@router.post("/wallet/create")
+async def create_wallet(
+    request: CreateWalletRequest,
+    user_id: str = Depends(get_current_user_id)
+):
+    """
+    创建钱包
+    1. 验证 web3 地址格式
+    2. 将加密后的 keystore 和地址保存到 Parse User
+    """
+    from app.core.logger import logger
     
-    total = await parse_client.count_objects("_User", where if where else None)
+    logger.info(f"[Wallet] 用户 {user_id} 创建钱包: {request.web3_address}")
     
-    return {
-        "data": result.get("results", []),
-        "total": total,
-        "page": page,
-        "limit": limit
-    }
+    # 验证地址格式
+    if not is_valid_ethereum_address(request.web3_address):
+        raise HTTPException(status_code=400, detail="无效的以太坊地址")
+    
+    # 检查地址是否已被使用
+    existing = await parse_client.query_users(where={"web3Address": request.web3_address})
+    if existing.get("results"):
+        raise HTTPException(status_code=400, detail="该钱包地址已被绑定")
+    
+    # 获取当前用户的 session token
+    from app.core.security import decode_access_token
+    from fastapi import Header
+    from app.core.config import settings
+    
+    # 更新用户信息
+    try:
+        update_data = {
+            "web3Address": checksum_address(request.web3_address),
+            "encryptedKeystore": request.encrypted_keystore,
+        }
+        
+        # 使用 Master Key 更新，因为 keystore 是敏感数据
+        await parse_client.update_user_with_master_key(user_id, update_data)
+        
+        logger.info(f"[Wallet] 钱包创建成功: {user_id} -> {request.web3_address}")
+        
+        return {
+            "success": True,
+            "message": "钱包创建成功",
+            "web3Address": checksum_address(request.web3_address)
+        }
+    except Exception as e:
+        logger.error(f"[Wallet] 创建钱包失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"创建钱包失败: {str(e)}")
+
+
+@router.post("/wallet/import")
+async def import_wallet(
+    request: ImportWalletRequest,
+    user_id: str = Depends(get_current_user_id)
+):
+    """
+    导入钱包
+    1. 验证 web3 地址格式
+    2. 将加密后的 keystore 和地址保存到 Parse User
+    """
+    from app.core.logger import logger
+    
+    logger.info(f"[Wallet] 用户 {user_id} 导入钱包: {request.web3_address}")
+    
+    # 验证地址格式
+    if not is_valid_ethereum_address(request.web3_address):
+        raise HTTPException(status_code=400, detail="无效的以太坊地址")
+    
+    # 检查地址是否已被其他用户使用
+    existing = await parse_client.query_users(where={"web3Address": request.web3_address})
+    if existing.get("results"):
+        existing_user = existing["results"][0]
+        if existing_user.get("objectId") != user_id:
+            raise HTTPException(status_code=400, detail="该钱包地址已被其他用户绑定")
+    
+    # 更新用户信息
+    try:
+        update_data = {
+            "web3Address": checksum_address(request.web3_address),
+            "encryptedKeystore": request.encrypted_keystore,
+        }
+        
+        # 使用 Master Key 更新
+        await parse_client.update_user_with_master_key(user_id, update_data)
+        
+        logger.info(f"[Wallet] 钱包导入成功: {user_id} -> {request.web3_address}")
+        
+        return {
+            "success": True,
+            "message": "钱包导入成功",
+            "web3Address": checksum_address(request.web3_address)
+        }
+    except Exception as e:
+        logger.error(f"[Wallet] 导入钱包失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"导入钱包失败: {str(e)}")
+
+
+@router.post("/wallet/transfer")
+async def transfer(
+    request: TransferRequest,
+    user_id: str = Depends(get_current_user_id)
+):
+    """
+    转账
+    1. 从 Parse 获取用户的加密 keystore
+    2. 使用密码解密 keystore 恢复钱包
+    3. 执行转账
+    """
+    from app.core.logger import logger
+    from eth_account import Account
+    import json
+    
+    logger.info(f"[Wallet] 用户 {user_id} 请求转账: {request.amount} ETH -> {request.to_address}")
+    
+    # 验证目标地址格式
+    if not is_valid_ethereum_address(request.to_address):
+        raise HTTPException(status_code=400, detail="无效的目标地址")
+    
+    try:
+        # 1. 获取用户信息
+        user = await parse_client.get_user(user_id)
+        encrypted_keystore = user.get("encryptedKeystore")
+        web3_address = user.get("web3Address")
+        
+        if not encrypted_keystore or not web3_address:
+            raise HTTPException(status_code=400, detail="用户尚未创建或导入钱包")
+        
+        # 2. 解密 keystore
+        try:
+            # encrypted_keystore 是 JSON 字符串
+            keystore_json = json.loads(encrypted_keystore)
+            # 使用 eth_account 解密
+            private_key = Account.decrypt(keystore_json, request.password)
+            account = Account.from_key(private_key)
+            
+            # 验证地址是否匹配
+            if account.address.lower() != web3_address.lower():
+                raise HTTPException(status_code=500, detail="钱包地址不匹配")
+        except Exception as e:
+            logger.error(f"[Wallet] 解密失败: {str(e)}")
+            raise HTTPException(status_code=400, detail="密码错误或 keystore 无效")
+        
+        # 3. 执行转账
+        from web3 import Web3
+        from decimal import Decimal
+        
+        # 连接 Web3
+        if not settings.web3_rpc_url:
+            raise HTTPException(status_code=500, detail="Web3 RPC 未配置")
+        
+        web3 = Web3(Web3.HTTPProvider(settings.web3_rpc_url))
+        if not web3.is_connected():
+            raise HTTPException(status_code=500, detail="无法连接到区块链节点")
+        
+        # 获取 nonce
+        nonce = web3.eth.get_transaction_count(account.address)
+        
+        # 构建交易
+        amount_wei = web3.to_wei(Decimal(request.amount), 'ether')
+        gas_price = web3.eth.gas_price
+        
+        transaction = {
+            'nonce': nonce,
+            'to': checksum_address(request.to_address),
+            'value': amount_wei,
+            'gas': 21000,  # 标准转账 gas
+            'gasPrice': gas_price,
+            'chainId': settings.web3_chain_id
+        }
+        
+        # 签名交易
+        signed_txn = web3.eth.account.sign_transaction(transaction, private_key)
+        
+        # 发送交易
+        tx_hash = web3.eth.send_raw_transaction(signed_txn.rawTransaction)
+        tx_hash_hex = web3.to_hex(tx_hash)
+        
+        logger.info(f"[Wallet] 转账成功: {tx_hash_hex}")
+        
+        # 等待交易确认（异步，不阻塞）
+        # receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
+        
+        return {
+            "success": True,
+            "message": "转账交易已提交",
+            "txHash": tx_hash_hex,
+            "from": account.address,
+            "to": checksum_address(request.to_address),
+            "amount": request.amount
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[Wallet] 转账失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"转账失败: {str(e)}")
