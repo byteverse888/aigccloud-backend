@@ -798,6 +798,8 @@ async def _update_last_login(user_id: str, session_token: str, address: str):
 def _build_user_response(user_data: dict, session_token: str, address: str):
     """构建用户响应数据"""
     user_id = user_data.get("objectId")
+    # web3Address: 优先使用传入的 address，否则使用 user_data 中的值
+    web3_address = address if address else user_data.get("web3Address")
     safe_user = {
         "objectId": user_id,
         "sessionToken": session_token,
@@ -810,7 +812,7 @@ def _build_user_response(user_data: dict, session_token: str, address: str):
         "coins": user_data.get("coins", 0),
         "avatar": user_data.get("avatar"),
         "avatarKey": user_data.get("avatarKey"),
-        "web3Address": address,
+        "web3Address": web3_address,
         "inviteCount": user_data.get("inviteCount", 0),
     }
     # Parse 配置 - 登录后动态下发，客户端无需静态配置
