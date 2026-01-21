@@ -728,3 +728,45 @@ async def transfer(
     except Exception as e:
         logger.error(f"[Wallet] 转账失败: {str(e)}")
         raise HTTPException(status_code=500, detail=f"转账失败: {str(e)}")
+
+
+@router.post("/wallet/unbind")
+async def unbind_wallet(
+    user_id: str = Depends(get_current_user_id)
+):
+    """
+    解绑钱包
+    删除用户的 web3Address 和 encryptedKeystore
+    """
+    from app.core.logger import logger
+    
+    logger.info(f"[Wallet] 用户 {user_id} 请求解绑钱包")
+    
+    try:
+        # 获取用户信息
+        user = await parse_client.get_user(user_id)
+        web3_address = user.get("web3Address")
+        
+        if not web3_address:
+            raise HTTPException(status_code=400, detail="用户未绑定钱包")
+        
+        # 使用 Master Key 删除钱包信息
+        update_data = {
+            "web3Address": {"__op": "Delete"},
+            "encryptedKeystore": {"__op": "Delete"},
+        }
+        
+        await parse_client.update_user_with_master_key(user_id, update_data)
+        
+        logger.info(f"[Wallet] 钱包解绑成功: {user_id}")
+        
+        return {
+            "success": True,
+            "message": "钱包解绑成功"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[Wallet] 解绑失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"解绑失败: {str(e)}")
