@@ -140,8 +140,22 @@ class ParseClient:
         return await self._request("POST", "/users", data)
     
     async def get_user(self, user_id: str) -> Dict[str, Any]:
-        """获取用户信息"""
-        return await self._request("GET", f"/users/{user_id}")
+        """获取用户信息（使用 Master Key）"""
+        url = f"{self.base_url}/users/{user_id}"
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.get(
+                    url,
+                    headers=self.master_headers,
+                    timeout=30.0
+                )
+                if response.status_code >= 400:
+                    logger.error(f"[Parse] 获取用户失败: {response.text}")
+                response.raise_for_status()
+                return response.json()
+            except Exception as e:
+                logger.error(f"[Parse] 获取用户异常: {str(e)}")
+                raise
     
     async def get_current_user(self, session_token: str) -> Dict[str, Any]:
         """通过 session token 获取当前用户信息"""
