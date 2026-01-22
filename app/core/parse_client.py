@@ -125,6 +125,40 @@ class ParseClient:
         result = await self._request("GET", f"/classes/{class_name}", params=params)
         return result.get("count", 0)
     
+    async def query(self, class_name: str, where: Optional[Dict] = None) -> List[Dict[str, Any]]:
+        """简化查询，直接返回 results 列表"""
+        result = await self.query_objects(class_name, where=where)
+        return result.get("results", [])
+    
+    async def query_and_update(
+        self, 
+        class_name: str, 
+        where: Dict[str, Any], 
+        data: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """查询第一个匹配对象并更新
+        
+        Args:
+            class_name: 类名
+            where: 查询条件
+            data: 要更新的数据
+            
+        Returns:
+            更新后的对象，或者 None 如果没找到
+        """
+        results = await self.query(class_name, where)
+        if not results:
+            logger.warning(f"[Parse] query_and_update: 未找到匹配对象 {class_name} {where}")
+            return None
+        
+        obj = results[0]
+        object_id = obj.get("objectId")
+        if not object_id:
+            logger.error(f"[Parse] query_and_update: 对象缺少 objectId")
+            return None
+        
+        return await self.update_object(class_name, object_id, data)
+    
     async def batch_operations(self, requests: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """批量操作"""
         return await self._request("POST", "/batch", {"requests": requests})

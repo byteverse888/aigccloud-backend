@@ -54,6 +54,8 @@ class PlanInfo(BaseModel):
     level: str
     days: int
     price: float
+    original_price: float
+    discount: int  # 折扣百分比，如 90 表示 9 折
     bonus: int
 
 
@@ -70,6 +72,8 @@ async def get_member_plans():
             level=plan["level"],
             days=plan["days"],
             price=plan["price"],
+            original_price=plan.get("original_price", plan["price"]),
+            discount=plan.get("discount", 100),
             bonus=plan["bonus"],
         ))
     return plans
@@ -92,11 +96,14 @@ async def subscribe_member(request: SubscribeRequest):
         raise HTTPException(status_code=400, detail="无效的套餐ID")
     
     # 2. 通过 session token 验证用户
+    logger.info(f"[会员订阅] user_id={request.user_id}, session_token={request.session_token[:20] if request.session_token else 'None'}...")
+    
     if not request.session_token:
         raise HTTPException(status_code=401, detail="未提供会话令牌")
     
     try:
         user = await parse_client.get_current_user(request.session_token)
+        logger.info(f"[会员订阅] 获取用户成功: {user.get('objectId')}")
         if user.get("objectId") != request.user_id:
             raise HTTPException(status_code=403, detail="用户身份不匹配")
     except Exception as e:

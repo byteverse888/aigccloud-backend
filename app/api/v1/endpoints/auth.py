@@ -14,6 +14,7 @@ from web3 import Web3
 from app.core.parse_client import parse_client
 from app.core.redis_client import redis_client
 from app.core.email_client import email_client
+from app.core.captcha import captcha_service
 from app.core.security import (
     create_access_token,
     verify_jwt_token,
@@ -61,11 +62,13 @@ class Web3InitRequest(BaseModel):
 
 
 class Web3LoginRequest(BaseModel):
-    """Web3 登录请求"""
+    """<Web3 登录请求"""
     address: str
     signature: str
     message: str
     password: Optional[str] = None  # 内置钱包需要密码，MetaMask 不需要
+    captcha_id: Optional[str] = None  # 验证码ID（注册时必填）
+    captcha_text: Optional[str] = None  # 验证码文本（注册时必填）
 
 
 class LoginResponse(BaseModel):
@@ -83,6 +86,45 @@ class ParseConfigResponse(BaseModel):
 
 
 # ============ 端点 ============
+
+@router.get("/captcha")
+async def get_captcha():
+    """
+    获取图片验证码
+    
+    返回:
+        - captcha_id: 验证码ID，用于提交时验证
+        - image: Base64编码的PNG图片
+    """
+    from fastapi.responses import Response
+    import base64
+    
+    captcha_id, image_bytes = await captcha_service.generate()
+    
+    # 返回 JSON 格式，图片使用 base64 编码
+    image_base64 = base64.b64encode(image_bytes).decode('utf-8')
+    
+    return {
+        "captcha_id": captcha_id,
+        "image": f"data:image/png;base64,{image_base64}"
+    }
+
+
+@router.get("/captcha/image/{captcha_id}")
+async def get_captcha_image(captcha_id: str):
+    """
+    获取验证码图片（直接返回PNG）
+    """
+    from fastapi.responses import Response
+    
+    _, image_bytes = await captcha_service.generate()
+    
+    return Response(
+        content=image_bytes,
+        media_type="image/png",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"}
+    )
+
 
 @router.post("/login", response_model=LoginResponse)
 async def login(request: LoginRequest):
@@ -830,15 +872,22 @@ async def web3_register(request: Web3LoginRequest):
     Web3 注册 - 验证签名并创建新用户
     
     流程：
-    1. 验证签名
-    2. 创建 Parse User
-    3. 返回 session token
+    1. 验证验证码
+    2. 验证签名
+    3. 创建 Parse User
+    4. 返回 session token
     """
     import httpx
     
     logger.info(f"[Web3] 注册请求: {request.address[:10]}...")
     
-    # 验证签名
+    # 1. 验证验证码（仅当传入验证码参数时才验证，导入私钥/助记词方式不需要验证码）
+    if request.captcha_id and request.captcha_text:
+        is_valid = await captcha_service.verify(request.captcha_id, request.captcha_text)
+        if not is_valid:
+            raise HTTPException(status_code=400, detail="验证码错误或已过期")
+    
+    # 2. 验证签名
     address, username = await _verify_web3_signature(request)
     
     # 创建新用户

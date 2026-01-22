@@ -14,15 +14,21 @@ from app.core.logger import logger
 
 
 # 会员套餐配置
+# VIP定价: 1月9.9元, 半年9折, 一年85折, 3年8折, 5年75折
+# SVIP: VIP价格的2倍
 MEMBER_PLANS = {
-    "vip_month": {"level": "vip", "days": 30, "price": 29.00, "bonus": 100, "name": "VIP月度会员"},
-    "vip_half": {"level": "vip", "days": 180, "price": 148.00, "bonus": 800, "name": "VIP半年会员"},
-    "vip_year": {"level": "vip", "days": 365, "price": 268.00, "bonus": 2000, "name": "VIP年度会员"},
-    "vip_3year": {"level": "vip", "days": 1095, "price": 688.00, "bonus": 8000, "name": "VIP三年会员"},
-    "svip_month": {"level": "svip", "days": 30, "price": 59.00, "bonus": 300, "name": "SVIP月度会员"},
-    "svip_half": {"level": "svip", "days": 180, "price": 298.00, "bonus": 2000, "name": "SVIP半年会员"},
-    "svip_year": {"level": "svip", "days": 365, "price": 498.00, "bonus": 5000, "name": "SVIP年度会员"},
-    "svip_3year": {"level": "svip", "days": 1095, "price": 1288.00, "bonus": 20000, "name": "SVIP三年会员"},
+    # VIP 套餐
+    "vip_month": {"level": "vip", "days": 30, "price": 9.90, "original_price": 9.90, "discount": 100, "bonus": 50, "name": "VIP月度会员"},
+    "vip_half": {"level": "vip", "days": 180, "price": 53.50, "original_price": 59.40, "discount": 90, "bonus": 300, "name": "VIP半年会员"},
+    "vip_year": {"level": "vip", "days": 365, "price": 101.00, "original_price": 118.80, "discount": 85, "bonus": 800, "name": "VIP年度会员"},
+    "vip_3year": {"level": "vip", "days": 1095, "price": 285.00, "original_price": 356.40, "discount": 80, "bonus": 3000, "name": "VIP三年会员"},
+    "vip_5year": {"level": "vip", "days": 1825, "price": 445.50, "original_price": 594.00, "discount": 75, "bonus": 6000, "name": "VIP五年会员"},
+    # SVIP 套餐 (VIP价格的2倍)
+    "svip_month": {"level": "svip", "days": 30, "price": 19.80, "original_price": 19.80, "discount": 100, "bonus": 100, "name": "SVIP月度会员"},
+    "svip_half": {"level": "svip", "days": 180, "price": 107.00, "original_price": 118.80, "discount": 90, "bonus": 600, "name": "SVIP半年会员"},
+    "svip_year": {"level": "svip", "days": 365, "price": 202.00, "original_price": 237.60, "discount": 85, "bonus": 1600, "name": "SVIP年度会员"},
+    "svip_3year": {"level": "svip", "days": 1095, "price": 570.00, "original_price": 712.80, "discount": 80, "bonus": 6000, "name": "SVIP三年会员"},
+    "svip_5year": {"level": "svip", "days": 1825, "price": 891.00, "original_price": 1188.00, "discount": 75, "bonus": 12000, "name": "SVIP五年会员"},
 }
 
 
