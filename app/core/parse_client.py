@@ -87,14 +87,28 @@ class ParseClient:
             
             logger.debug(f"[Parse] 响应: {response.status_code}")
             if response.status_code >= 400:
-                logger.error(f"[Parse] 错误响应: {response.text}")
+                # 识别 PG schema 缺列错误（42703 errorMissingColumn）
+                # 该错误说明查询的字段从未被写入过，调用方一般已有 try/except 兑底返空，
+                # 无需 ERROR 级别刷屏（完全隐藏又不利于疑难问题跟踪，故降级为 WARNING 且只带上下文摘要）
+                _txt = response.text
+                if response.status_code == 500 and '"42703"' in _txt:
+                    logger.warning(
+                        f"[Parse] PG 列缺失（42703）已兑底返空; url={url}"
+                    )
+                else:
+                    logger.error(f"[Parse] 错误响应: {_txt}")
             
             response.raise_for_status()
             result = response.json()
             logger.debug(f"[Parse] 成功: {str(result)[:200]}...")
             return result
         except httpx.HTTPStatusError as e:
-            logger.error(f"[Parse] HTTP错误: {e.response.status_code} - {e.response.text}")
+            # 42703 同样降级为 WARNING，避免 成对 ERROR 刷屏
+            _t = e.response.text
+            if e.response.status_code == 500 and '"42703"' in _t:
+                logger.warning(f"[Parse] HTTP 500 (PG 42703): url={url}")
+            else:
+                logger.error(f"[Parse] HTTP错误: {e.response.status_code} - {_t}")
             raise
         except Exception as e:
             logger.error(f"[Parse] 请求异常: {str(e)}")
@@ -128,7 +142,19 @@ class ParseClient:
         count: bool = False,
         include: Optional[str] = None
     ) -> Dict[str, Any]:
-        """查询对象列表"""
+        """查询对象列表
+
+        注意：_User 是 Parse Server 系统类，与普通业务类不同，
+        受 ACL/CLP 限制必须使用 Master Key，否则模型会返回 空结果 或 拒访。
+        这里自动代理到 query_users，调用方无需感知 master key 表现。
+        """
+        if class_name == "_User":
+            if count or include:
+                logger.warning(
+                    "[Parse] query_objects(_User) 忽略 count/include 参数，"
+                    "如需按需使用 count_users 或直接调用 _request"
+                )
+            return await self.query_users(where=where, order=order, limit=limit, skip=skip)
         import json
         params = {"limit": limit, "skip": skip}
         if where:
@@ -142,7 +168,13 @@ class ParseClient:
         return await self._request("GET", f"/classes/{class_name}", params=params)
     
     async def count_objects(self, class_name: str, where: Optional[Dict] = None) -> int:
-        """统计对象数量"""
+        """统计对象数量
+
+        注意：_User 系统类必须使用 Master Key 才能拿到正确的 count（受 ACL/CLP 限制），
+        这里自动代理到 count_users，避免调用方重复判断。
+        """
+        if class_name == "_User":
+            return await self.count_users(where)
         import json
         params = {"count": "1", "limit": "0"}
         if where:
@@ -731,6 +763,7 @@ class ParseClient:
             "description": {"type": "String"},
             "relatedOrderNo": {"type": "String"},
             "relatedId": {"type": "String"},     # 幂等/去重 key（product_id/task_id/order_id/tx_hash 等）
+            "inviteeId": {"type": "String"},    # 邀请激励场景下的被邀请人用户 ID（预创建避免 PG lazy schema 42703）
             "status": {"type": "String"},         # success/failed/pending
             "operator_id": {"type": "String"},
             "operator_name": {"type": "String"},
@@ -791,6 +824,39 @@ class ParseClient:
             "status": {"type": "String"},
             "errorMessage": {"type": "String"},
         },
+    }
+
+    # _User 系统类业务字段（仅补字段，不接管 CLP）
+    # 解决 PG lazy schema 下查询未写入过的列报 42703 errorMissingColumn
+    # （如 inviterId 在邀请记录查询 /promotion/records 中频频报 500）
+    USER_BUSINESS_FIELDS: Dict[str, Dict] = {
+        # 推广 / 邀请
+        "inviterId": {"type": "String"},
+        "inviteCode": {"type": "String"},
+        "inviteCount": {"type": "Number"},
+        "successRegCount": {"type": "Number"},
+        "firstRechargeRewarded": {"type": "Boolean"},
+        # 账户积分 / 可兑换积分
+        "totalIncentive": {"type": "Number"},
+        "exchangeableBalance": {"type": "Number"},
+        "pendingSettlement": {"type": "Number"},
+        "totalContribution": {"type": "Number"},
+        # 节点 / 算力贡献
+        "nodeCoefficient": {"type": "Number"},
+        "continuousOnlineHours": {"type": "Number"},
+        "lastSeenAt": {"type": "String"},
+        "nodeCalcDetail": {"type": "Object"},
+        # Web3
+        "web3Address": {"type": "String"},
+        # 会员
+        "memberLevel": {"type": "String"},
+        "memberExpireAt": {"type": "String"},
+        # 支付密码
+        "paymentPassword": {"type": "String"},
+        # 账号状态
+        "role": {"type": "String"},
+        "level": {"type": "Number"},
+        "disabledReason": {"type": "String"},
     }
     
     # CLP 权限配置：根据环境区分
@@ -866,6 +932,10 @@ class ParseClient:
                     
                     # 确保 CLP 正确
                     await self._ensure_clp(client, class_name)
+                    
+                    # PG 物理列一致性修复：重复 PUT 已声明的全部字段，触发 PG adapter 补列。
+                    # 场景：_SCHEMA 记录了 metadata（lazy 写入过）但 PG 表中列不存在，导致后续查询 42703。
+                    await self._reconcile_pg_columns(client, class_name, fields)
                     continue
                 
                 # 类不存在，创建并带上字段定义和 CLP
@@ -884,6 +954,59 @@ class ParseClient:
                     logger.error(f"[Parse] Schema 创建失败: {class_name} - {create_resp.text}")
             except Exception as e:
                 logger.error(f"[Parse] ensure_schema 异常({class_name}): {e}")
+
+        # 补齐 _User 业务字段（避免 PG lazy schema 下查询未写入过的列报 500）
+        try:
+            await self._ensure_user_fields(client)
+        except Exception as e:
+            logger.error(f"[Parse] _ensure_user_fields 异常: {e}")
+
+    async def _reconcile_pg_columns(self, client, class_name: str, fields: Dict):
+        """对已声明的字段重复 PUT 一次，以修复 Parse _SCHEMA 与 PG 物理表的不一致。
+        
+        场景：历史上某些字段被 lazy 写入过，_SCHEMA 记录了 metadata，但 PG 物理列未同步创建，
+        导致后续查询报 42703。重复 PUT 是幂等的（Parse 收到 “字段已存在同类型” 会忑默接受），
+        但能触发 PG adapter 重新校验/ALTER TABLE 补列。
+        """
+        try:
+            put_resp = await client.put(
+                f"{self.base_url}/schemas/{class_name}",
+                json={"className": class_name, "fields": fields},
+            )
+            if put_resp.status_code == 200:
+                logger.debug(f"[Parse] PG 列一致性 reconciled: {class_name}")
+            else:
+                # 部分 Parse 版本对已存在字段 PUT 会返 400，此时忽略即可
+                logger.debug(f"[Parse] PG 列 reconcile 跳过 {class_name}: {put_resp.status_code}")
+        except Exception as e:
+            logger.debug(f"[Parse] _reconcile_pg_columns 忽略 {class_name}: {e}")
+    
+    async def _ensure_user_fields(self, client):
+        """仅为 _User 系统类补齐业务字段。不修改 CLP，不删除现有字段。"""
+        try:
+            resp = await client.get(f"{self.base_url}/schemas/_User")
+            if resp.status_code != 200:
+                logger.warning(f"[Parse] 读 _User schema 失败: {resp.status_code} {resp.text}")
+                return
+            existing = resp.json().get("fields", {})
+            missing = {}
+            for k, v in self.USER_BUSINESS_FIELDS.items():
+                if k not in existing:
+                    missing[k] = v
+            if not missing:
+                logger.debug("[Parse] _User 业务字段 OK")
+                return
+            logger.info(f"[Parse] 补充 _User 字段: {list(missing.keys())}")
+            put_resp = await client.put(
+                f"{self.base_url}/schemas/_User",
+                json={"className": "_User", "fields": missing},
+            )
+            if put_resp.status_code == 200:
+                logger.info(f"[Parse] _User 字段补充成功: {list(missing.keys())}")
+            else:
+                logger.error(f"[Parse] _User 字段补充失败: {put_resp.text}")
+        except Exception as e:
+            logger.error(f"[Parse] _ensure_user_fields 异常: {e}")
     
     async def _ensure_clp(self, client, class_name: str):
         """确保指定类的 CLP 允许客户端访问"""

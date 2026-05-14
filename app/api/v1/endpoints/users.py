@@ -204,15 +204,13 @@ async def register_phone(request: PhoneRegisterRequest):
         "totalIncentive": 0,
     }
     
-    # 处理邀请码
+    # 处理邀请码：优先按 inviteCode 短码反查，未命中时回退 objectId（兼容存量链接）
     if request.invite_code:
-        inviter = await parse_client.query_users(
-            where={"objectId": request.invite_code}
-        )
-        if inviter.get("results"):
-            inviter_user = inviter["results"][0]
+        from app.core.promotion_code import resolve_inviter_by_code
+        inviter_user = await resolve_inviter_by_code(request.invite_code)
+        if inviter_user:
             extra_data["inviterId"] = inviter_user["objectId"]
-            await parse_client.update_user(
+            await parse_client.update_user_with_master_key(
                 inviter_user["objectId"],
                 {
                     "inviteCount": parse_client.increment(1),
@@ -234,7 +232,7 @@ async def register_phone(request: PhoneRegisterRequest):
         "amount": 100,
         "description": "注册奖励"
     })
-    await parse_client.update_user(new_user["objectId"], {
+    await parse_client.update_user_with_master_key(new_user["objectId"], {
         "totalIncentive": parse_client.increment(100)
     })
     
@@ -280,17 +278,14 @@ async def activate_user(token: str):
         "totalIncentive": 0,
     }
     
-    # 处理邀请码
+    # 处理邀请码：优先按 inviteCode 短码反查，未命中时回退 objectId（兼容存量链接）
     if user_data.get("invite_code"):
-        # 查找邀请人
-        inviter = await parse_client.query_users(
-            where={"objectId": user_data['invite_code']}
-        )
-        if inviter.get("results"):
-            inviter_user = inviter["results"][0]
+        from app.core.promotion_code import resolve_inviter_by_code
+        inviter_user = await resolve_inviter_by_code(user_data["invite_code"])
+        if inviter_user:
             extra_data["inviterId"] = inviter_user["objectId"]
             # 更新邀请人的统计
-            await parse_client.update_user(
+            await parse_client.update_user_with_master_key(
                 inviter_user["objectId"],
                 {
                     "inviteCount": parse_client.increment(1),
@@ -312,7 +307,7 @@ async def activate_user(token: str):
         "amount": 100,
         "description": "注册奖励"
     })
-    await parse_client.update_user(new_user["objectId"], {
+    await parse_client.update_user_with_master_key(new_user["objectId"], {
         "totalIncentive": parse_client.increment(100)
     })
     
@@ -366,8 +361,8 @@ async def reset_password(request: SetNewPasswordRequest):
     if not user_id:
         raise HTTPException(status_code=400, detail="重置链接无效或已过期")
     
-    # 更新密码 - Parse会自动hash
-    await parse_client.update_user(user_id, {"password": request.new_password})
+    # 更新密码 - Parse会自动hash（_User 必须 Master Key）
+    await parse_client.update_user_with_master_key(user_id, {"password": request.new_password})
     
     # 删除Token
     await redis_client.delete(f"reset_pwd:{request.token}")
@@ -675,8 +670,8 @@ async def check_membership(user_id: str):
             expire_date = datetime.fromisoformat(member_expire_at.replace("Z", "+00:00"))
             if expire_date < datetime.now(expire_date.tzinfo):
                 is_expired = True
-                # 更新用户状态
-                await parse_client.update_user(user_id, {"memberLevel": "normal"})
+                # 更新用户状态（_User 必须 Master Key）
+                await parse_client.update_user_with_master_key(user_id, {"memberLevel": "normal"})
                 member_level = "normal"
         
         # 从联盟链获取余额

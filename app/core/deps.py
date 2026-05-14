@@ -2,9 +2,10 @@
 依赖注入
 """
 from typing import Optional, Dict, Any
-from fastapi import Header, HTTPException, status
+from fastapi import Header, HTTPException, Request, status
 from app.core.security import verify_jwt_token
 from app.core.parse_client import parse_client
+from app.core.logger import logger
 
 
 async def get_current_user_id(
@@ -159,6 +160,7 @@ async def get_optional_parse_user(
 # ============ 兼容鉴权 (Session Token 与 Bearer JWT 任一) ============
 
 async def get_current_user_id_compat(
+    request: Request,
     parse_session: Optional[str] = Header(None, alias="X-Parse-Session-Token"),
     authorization: Optional[str] = Header(None, alias="Authorization"),
 ) -> str:
@@ -173,8 +175,8 @@ async def get_current_user_id_compat(
             uid = user.get("objectId") or user.get("id")
             if uid:
                 return uid
-        except Exception:
-            pass  # 回落到 JWT
+        except Exception as _se:
+            logger.debug(f"[Auth] session 校验失败回落 JWT: {_se}")
     
     # 2) Bearer JWT
     if authorization:
@@ -182,6 +184,16 @@ async def get_current_user_id_compat(
         uid = verify_jwt_token(token)
         if uid:
             return uid
+        logger.warning(
+            f"[Auth] JWT 无效或过期 path={request.url.path} "
+            f"token_prefix={token[:12] if token else ''}..."
+        )
+    else:
+        # 没有 Authorization 也没有 Session：通常为前端 token 未注入（前端 store 未 hydrate / token 被清）
+        if not parse_session:
+            logger.warning(
+                f"[Auth] 请求未携带任何认证头 path={request.url.path}"
+            )
     
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,

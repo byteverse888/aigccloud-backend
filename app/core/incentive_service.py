@@ -80,6 +80,39 @@ class IncentiveService:
             logger.warning(f"[IncentiveService] 读取兑换比例失败，使用默认: {e}")
         return DEFAULT_EXCHANGE_POINTS, DEFAULT_EXCHANGE_COINS
 
+    async def _get_promotion_config(self) -> dict:
+        """
+        从 SystemConfig.category=promotion 读取推广奖励配置
+        回退到 INCENTIVE_CONFIG 默认值
+        """
+        defaults = {
+            "inviteRegisterReward": float(INCENTIVE_CONFIG.get("invite_register", 100)),
+            "inviteFirstRechargeRate": float(INCENTIVE_CONFIG.get("invite_first_recharge_rate", 0.1)),
+            "enabled": True,
+            "disabledReason": "",  # 禁用原因码（仅在 enabled=False 时有业务含义）
+            "rules": [
+                "邀请好友注册即得奖励积分",
+                "好友首次充值，按比例返利",
+            ],
+        }
+        try:
+            result = await parse_client.query_objects(
+                "SystemConfig", where={"category": "promotion"}, limit=1
+            )
+            items = result.get("results", [])
+            if items:
+                s = items[0].get("settings", {}) or {}
+                return {
+                    "inviteRegisterReward": float(s.get("inviteRegisterReward", defaults["inviteRegisterReward"])),
+                    "inviteFirstRechargeRate": float(s.get("inviteFirstRechargeRate", defaults["inviteFirstRechargeRate"])),
+                    "enabled": bool(s.get("enabled", True)),
+                    "disabledReason": str(s.get("disabledReason") or ""),
+                    "rules": list(s.get("rules") or defaults["rules"]),
+                }
+        except Exception as e:
+            logger.warning(f"[IncentiveService] 读取推广配置失败，使用默认: {e}")
+        return defaults
+
     async def _check_idempotent(self, related_id: str, category: Optional[str] = None) -> bool:
         """检查是否已存在 success 状态的账本记录，避免重复发放"""
         if not related_id:
@@ -108,6 +141,7 @@ class IncentiveService:
         operator_id: Optional[str] = None,
         operator_name: Optional[str] = None,
         check_idempotent: bool = True,
+        extra: Optional[dict] = None,
     ) -> dict:
         """
         统一账户积分账本：原子变更 totalIncentive + 写 AccountRecord
@@ -117,6 +151,7 @@ class IncentiveService:
             type_: recharge/purchase/refund/reward/exchange/consume
             category: 细分类别（product_purchase/daily_sign/exchange_to_web3 ...）
             related_id: 幂等 key
+            extra: 额外写入 AccountRecord 的结构化字段（如 inviteeId），不会覆盖核心字段
         """
         if delta == 0:
             return {"success": False, "error": "变动金额不能为 0"}
@@ -171,6 +206,14 @@ class IncentiveService:
             record_data["operator_id"] = operator_id
         if operator_name:
             record_data["operator_name"] = operator_name
+        # 合并额外结构化字段（如 inviteeId），不覆盖核心字段
+        if extra and isinstance(extra, dict):
+            for k, v in extra.items():
+                if k in record_data:
+                    continue
+                if v is None:
+                    continue
+                record_data[k] = v
 
         try:
             rec = await parse_client.create_object("AccountRecord", record_data)
@@ -289,9 +332,15 @@ class IncentiveService:
         """
         邀请注册奖励（进入账户积分余额）
 
+        金额从 SystemConfig.promotion.inviteRegisterReward 读取，回退默认 100
         幂等：以 invite_register_<invitee_id> 为 key，防止同一被邀请人重复触发
         """
-        amount = float(INCENTIVE_CONFIG.get("invite_register", 100))
+        cfg = await self._get_promotion_config()
+        if not cfg.get("enabled", True):
+            return {"success": True, "skipped": True, "amount": 0, "message": "推广奖励已关闭"}
+        amount = float(cfg.get("inviteRegisterReward") or 0)
+        if amount <= 0:
+            return {"success": True, "skipped": True, "amount": 0, "message": "奖励金额为 0"}
         related_id = f"invite_register_{invitee_id}" if invitee_id else None
         result = await self.adjust_user_balance(
             user_id=inviter_id,
@@ -300,10 +349,154 @@ class IncentiveService:
             category="invite_register",
             description=f"邀请 {invitee_name} 注册奖励",
             related_id=related_id,
+            extra={"inviteeId": invitee_id} if invitee_id else None,
         )
         if result.get("success") and not result.get("skipped"):
             return {"success": True, "amount": amount, "message": "邀请奖励已发放"}
         return result
+
+    async def grant_invite_first_recharge_reward(
+        self,
+        inviter_id: str,
+        invitee_id: str,
+        invitee_name: str,
+        recharge_amount: float,
+        order_id: str,
+    ) -> dict:
+        """
+        邀请首充返利（进入账户积分余额）
+
+        比例从 SystemConfig.promotion.inviteFirstRechargeRate 读取，回退默认 0.1
+        幂等：以 invite_first_recharge_<invitee_id> 为复合 key（按“被邀请人首充”语义去重，
+              同一被邀请人任何后续订单在 grant 层都会幂等跳过，从根本上防
+              御并发场景下“读检查→发放→写标记”未原子导致的双发风险）
+        触发点：所有 type=recharge 充值订单与会员订阅订单完成时
+        """
+        cfg = await self._get_promotion_config()
+        if not cfg.get("enabled", True):
+            return {"success": True, "skipped": True, "amount": 0, "message": "推广奖励已关闭"}
+        rate = float(cfg.get("inviteFirstRechargeRate") or 0)
+        amt = float(recharge_amount or 0)
+        if rate <= 0 or amt <= 0:
+            return {"success": True, "skipped": True, "amount": 0, "message": "返利比例或金额为 0"}
+        bonus = round(amt * rate, 2)
+        if bonus <= 0:
+            return {"success": True, "skipped": True, "amount": 0}
+        # 幂等键采用复合“被邀请人”维度而非订单维度，
+        # 避免同一 invitee 并发“充值订单 + 会员订阅订单”同时进入 grant 造成双发。
+        related_id = f"invite_first_recharge_{invitee_id}"
+        result = await self.adjust_user_balance(
+            user_id=inviter_id,
+            delta=bonus,
+            type_="reward",
+            category="invite_first_recharge",
+            description=f"邀请 {invitee_name} 首充返利（充值 {amt:g} 元 × {rate*100:g}%）",
+            related_id=related_id,
+            related_order_no=order_id,
+            extra={"inviteeId": invitee_id} if invitee_id else None,
+        )
+        if result.get("success") and not result.get("skipped"):
+            # 同步累加到 _User.exchangeableBalance（独立可兑换积分字段）
+            # 业务语义：被邀请人实际付费触发，等同算力激励里的“可兑换积分”入账
+            # 使用 Parse 原子 Increment，避免并发覆盖；失败仅告警，不阻断流水
+            try:
+                await parse_client.update_user_with_master_key(
+                    inviter_id,
+                    {"exchangeableBalance": {"__op": "Increment", "amount": bonus}},
+                )
+            except Exception as _e:
+                logger.warning(
+                    f"[首充返利] 累加 exchangeableBalance 失败 inviter={inviter_id} bonus={bonus}: {_e}"
+                )
+            return {"success": True, "amount": bonus, "message": "首充返利已发放"}
+        return result
+
+    async def try_grant_first_recharge_for_order(
+        self,
+        user_id: str,
+        order_id: str,
+        order_amount: float,
+        scene: str = "recharge",
+    ) -> dict:
+        """
+        统一入口：订单完成后调用一次，内部完成
+        1. 读 buyer
+        2. 校验 inviterId / firstRechargeRewarded / amount > 0
+        3. 发放首充返利
+        4. 发放成功后标记 firstRechargeRewarded=True
+
+        适用于“普通充值”与“会员订阅”两个场景（仅这两个场景会触发）。
+        其他场景请勿调用。
+
+        Returns: { success, granted, skipped, amount, reason }
+        """
+        log_prefix = f"[首充返利][{scene}]"
+        if not user_id or not order_id:
+            return {"success": True, "granted": False, "skipped": True, "reason": "missing_params"}
+        try:
+            amt = float(order_amount or 0)
+        except Exception:
+            amt = 0.0
+        if amt <= 0:
+            return {"success": True, "granted": False, "skipped": True, "reason": "zero_amount"}
+
+        try:
+            buyer = await parse_client.get_user(user_id)
+        except Exception as e:
+            logger.warning(f"{log_prefix} 读取 buyer 失败: {e}")
+            return {"success": False, "granted": False, "error": "buyer_not_found"}
+
+        if not buyer:
+            return {"success": False, "granted": False, "error": "buyer_not_found"}
+
+        inviter_id = buyer.get("inviterId")
+        if not inviter_id:
+            return {"success": True, "granted": False, "skipped": True, "reason": "no_inviter"}
+        if bool(buyer.get("firstRechargeRewarded")):
+            return {"success": True, "granted": False, "skipped": True, "reason": "already_rewarded"}
+
+        invitee_name = buyer.get("username", "新用户")
+        try:
+            invite_reward = await self.grant_invite_first_recharge_reward(
+                inviter_id=inviter_id,
+                invitee_id=user_id,
+                invitee_name=invitee_name,
+                recharge_amount=amt,
+                order_id=order_id,
+            )
+        except Exception as e:
+            logger.error(f"{log_prefix} 发放异常: {e}", exc_info=True)
+            return {"success": False, "granted": False, "error": str(e)}
+
+        if invite_reward.get("success") and not invite_reward.get("skipped"):
+            # 标记 firstRechargeRewarded=True（仅发放成功且非幂等跳过时才写）
+            try:
+                await parse_client.update_user_with_master_key(
+                    user_id, {"firstRechargeRewarded": True}
+                )
+            except Exception as _e:
+                logger.warning(f"{log_prefix} 标记 firstRechargeRewarded 失败: {_e}")
+            logger.info(
+                f"{log_prefix} 邀请人首充返利已发放: inviter={inviter_id}, "
+                f"amount={invite_reward.get('amount')}, order={order_id}"
+            )
+            return {
+                "success": True,
+                "granted": True,
+                "amount": invite_reward.get("amount"),
+                "inviter_id": inviter_id,
+            }
+
+        if invite_reward.get("skipped"):
+            return {
+                "success": True,
+                "granted": False,
+                "skipped": True,
+                "reason": invite_reward.get("message") or "skipped",
+            }
+
+        logger.warning(f"{log_prefix} 首充返利发放失败: {invite_reward.get('error')}")
+        return {"success": False, "granted": False, "error": invite_reward.get("error")}
 
     async def grant_recharge_reward(
         self,

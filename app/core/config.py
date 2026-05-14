@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     # JWT
     jwt_secret_key: str = "your-secret-key-256bits-random-string"  # 256位随机字符串
     jwt_algorithm: str = "HS256"
-    jwt_access_token_expire_minutes: int = 1440  # 24小时
+    jwt_access_token_expire_minutes: int = 43200  # 30天（1个月），过期前由前端定时刷新续期
 
     # WeChat Pay (测试数据)
     wechat_app_id: str = "wx_test_appid"

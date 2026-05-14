@@ -553,6 +553,19 @@ async def complete_member_order(order_id: str, order: dict) -> SubscribeResponse
                     logger.warning(f"[会员订阅] 发放积分奖励失败: {user_id}, 原因: {reward_result.get('error')}")
             except Exception as e:
                 logger.error(f"[会员订阅] 发放积分异常: {e}")
+
+        # 8. 邀请人首充返利：统一走 IncentiveService.try_grant_first_recharge_for_order
+        try:
+            order_amount = float(order.get("amount", 0) or price or 0)
+            if order_amount > 0:
+                await incentive_service.try_grant_first_recharge_for_order(
+                    user_id=user_id,
+                    order_id=order_id,
+                    order_amount=order_amount,
+                    scene="member_subscribe",
+                )
+        except Exception as e:
+            logger.error(f"[会员订阅] 发放邀请人首充返利异常: {e}")
         
         return SubscribeResponse(
             success=True,

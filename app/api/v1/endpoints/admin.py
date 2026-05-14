@@ -934,3 +934,196 @@ async def account_summary(user_id: str = Depends(get_operator_user_id)):
         "totalIncome": round(total_income, 2),
         "totalExpense": round(total_expense, 2),
     }
+
+
+# ==================== 推广（邀请）统计 ====================
+
+@router.get("/stats/referral")
+async def stats_referral(user_id: str = Depends(get_operator_user_id)):
+    """推广总览：累计推广人数/今日新增/累计邀请奖励/累计首充返利/近 7 日趋势/Top10 推广人"""
+    today = _today_start()
+
+    # 总被邀请人数（带 inviterId 的用户）
+    total_invitees = await parse_client.count_objects(
+        "_User", {"inviterId": {"$exists": True, "$ne": ""}}
+    )
+    # 今日新增被邀请人
+    today_invitees = await parse_client.count_objects(
+        "_User",
+        {
+            "inviterId": {"$exists": True, "$ne": ""},
+            "createdAt": {"$gte": {"__type": "Date", "iso": today}},
+        },
+    )
+
+    # 累计发放金额（从 AccountRecord）
+    async def _sum_record_amount(category: str) -> float:
+        try:
+            res = await parse_client.query_objects(
+                "AccountRecord",
+                where={
+                    "type": "reward",
+                    "category": category,
+                    "status": "success",
+                    "amount": {"$gt": 0},
+                },
+                limit=10000,
+            )
+            return sum(float(r.get("amount", 0) or 0) for r in res.get("results", []))
+        except Exception:
+            return 0.0
+
+    total_register_reward, total_recharge_reward = await asyncio.gather(
+        _sum_record_amount("invite_register"),
+        _sum_record_amount("invite_first_recharge"),
+    )
+
+    # 近 7 日新增被邀请人趋势
+    now = datetime.now(timezone.utc)
+    daily_trend = []
+    for i in range(6, -1, -1):
+        day_start = (now - timedelta(days=i)).replace(hour=0, minute=0, second=0, microsecond=0)
+        day_end = day_start + timedelta(days=1)
+        cnt = await parse_client.count_objects(
+            "_User",
+            {
+                "inviterId": {"$exists": True, "$ne": ""},
+                "createdAt": {
+                    "$gte": {"__type": "Date", "iso": day_start.isoformat()},
+                    "$lt": {"__type": "Date", "iso": day_end.isoformat()},
+                },
+            },
+        )
+        daily_trend.append({"date": day_start.strftime("%Y-%m-%d"), "count": cnt})
+
+    # Top10 推广人
+    top_users = await parse_client.query_users(
+        where={"successRegCount": {"$gt": 0}},
+        order="-successRegCount",
+        limit=10,
+    )
+    leaderboard = []
+    rank = 1
+    for u in top_users.get("results", []):
+        leaderboard.append({
+            "rank": rank,
+            "user_id": u["objectId"],
+            "username": u.get("username", ""),
+            "invite_count": int(u.get("inviteCount", 0) or 0),
+            "success_reg_count": int(u.get("successRegCount", 0) or 0),
+        })
+        rank += 1
+
+    return {
+        "total_invitees": int(total_invitees or 0),
+        "today_invitees": int(today_invitees or 0),
+        "total_register_reward": round(total_register_reward, 2),
+        "total_recharge_reward": round(total_recharge_reward, 2),
+        "total_reward": round(total_register_reward + total_recharge_reward, 2),
+        "daily_trend": daily_trend,
+        "leaderboard": leaderboard,
+    }
+
+
+@router.get("/referral/records")
+async def list_referral_records(
+    page: int = 1,
+    limit: int = 20,
+    inviter: Optional[str] = None,
+    user_id: str = Depends(get_operator_user_id),
+):
+    """全平台推广记录列表：返回被邀请人 + 邀请人信息 + 各项奖励金额"""
+    skip = max(0, (page - 1) * limit)
+    where: dict = {"inviterId": {"$exists": True, "$ne": ""}}
+
+    # 按邀请人用户名过滤（需先根据用户名查 inviterId）
+    if inviter:
+        try:
+            inviter_users = await parse_client.query_users(
+                where={"username": {"$regex": inviter}}, limit=20
+            )
+            inviter_ids = [u["objectId"] for u in inviter_users.get("results", [])]
+            if not inviter_ids:
+                return {"data": [], "total": 0, "page": page, "limit": limit}
+            where["inviterId"] = {"$in": inviter_ids}
+        except Exception as e:
+            logger.warning(f"[推广记录] 按邀请人筛选失败: {e}")
+
+    invitees = await parse_client.query_users(
+        where=where, order="-createdAt", limit=limit, skip=skip
+    )
+    total = await parse_client.count_objects("_User", where)
+
+    # 批量查邀请人资料
+    inviter_ids = list({iv.get("inviterId") for iv in invitees.get("results", []) if iv.get("inviterId")})
+    inviter_map: dict = {}
+    if inviter_ids:
+        try:
+            inviter_users = await parse_client.query_users(
+                where={"objectId": {"$in": inviter_ids}}, limit=len(inviter_ids)
+            )
+            for u in inviter_users.get("results", []):
+                inviter_map[u["objectId"]] = u.get("username", "")
+        except Exception:
+            pass
+
+    data = []
+    for invitee in invitees.get("results", []):
+        invitee_id = invitee["objectId"]
+        invitee_username = invitee.get("username", "")
+        inviter_id_v = invitee.get("inviterId", "")
+
+        # 注册奖励（精准 relatedId）
+        register_reward = 0.0
+        try:
+            reg = await parse_client.query_objects(
+                "AccountRecord",
+                where={
+                    "userId": inviter_id_v,
+                    "category": "invite_register",
+                    "relatedId": f"invite_register_{invitee_id}",
+                    "status": "success",
+                },
+                limit=1,
+            )
+            register_reward = sum(float(r.get("amount", 0) or 0) for r in reg.get("results", []))
+        except Exception:
+            pass
+
+        # 首充返利（按 description 含被邀请人名）
+        recharge_reward = 0.0
+        if invitee_username:
+            try:
+                rec = await parse_client.query_objects(
+                    "AccountRecord",
+                    where={
+                        "userId": inviter_id_v,
+                        "category": "invite_first_recharge",
+                        "description": {"$regex": invitee_username},
+                        "status": "success",
+                    },
+                    limit=10,
+                )
+                recharge_reward = sum(float(r.get("amount", 0) or 0) for r in rec.get("results", []))
+            except Exception:
+                pass
+
+        data.append({
+            "id": invitee_id,
+            "invitee_id": invitee_id,
+            "invitee_name": invitee_username,
+            "inviter_id": inviter_id_v,
+            "inviter_name": inviter_map.get(inviter_id_v, ""),
+            "status": "first_recharged" if invitee.get("firstRechargeRewarded") else "registered",
+            "register_reward": round(register_reward, 2),
+            "recharge_reward": round(recharge_reward, 2),
+            "total_reward": round(register_reward + recharge_reward, 2),
+            "created_at": invitee.get("createdAt", ""),
+        })
+
+    return {
+        "data": data,
+        "total": int(total or 0),
+        "page": page,
+        "limit": limit,
+    }

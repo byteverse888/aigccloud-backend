@@ -515,6 +515,21 @@ async def verify_web3_transfer(request: VerifyTransferRequest):
                     logger.warning(f"[验证转账] 充值赠送积分发放失败: {reward_result.get('error')}")
         except Exception as e:
             logger.error(f"[验证转账] 发放充值赠送积分异常: {e}")
+
+        # 12. 邀请人首充返利：仅限 recharge 订单 + 用户绑定了 inviterId + 未发放过
+        try:
+            order_type = order.get("type")
+            user_id = order.get("userId")
+            order_amount = float(order.get("amount", 0))
+            if order_type == "recharge" and user_id and order_amount > 0:
+                await incentive_service.try_grant_first_recharge_for_order(
+                    user_id=user_id,
+                    order_id=request.order_id,
+                    order_amount=order_amount,
+                    scene="recharge",
+                )
+        except Exception as e:
+            logger.error(f"[验证转账] 发放邀请人首充返利异常: {e}")
         
         return {
             "success": True,
