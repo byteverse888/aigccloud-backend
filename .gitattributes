@@ -1,0 +1,13 @@
+# Auto-normalize line endings: text files stored as LF in repo,
+# checked out per platform (industry-standard baseline).
+* text=auto
+
+# Shell scripts must always use LF so they run correctly on Linux servers,
+# even when checked out on Windows (this overrides core.autocrlf=true).
+*.sh text eol=lf
+
+# Binary files - never touch line endings
+*.png binary
+*.ico binary
+*.jpg binary
+*.gif binary
